@@ -22,6 +22,8 @@ import io.trino.execution.TableInfo;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.DynamicFilterId;
@@ -49,7 +51,8 @@ import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_SPLITS_PER_NODE;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.aggregation;
 import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
 import static io.trino.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static io.trino.sql.planner.plan.JoinType.INNER;
@@ -112,7 +115,7 @@ public class TestJsonRepresentation
                                 "Values",
                                 ImmutableMap.of(),
                                 ImmutableList.of(typedSymbol("field", INTEGER)),
-                                ImmutableList.of("(1)", "(2)"),
+                                ImmutableList.of("(integer '1')", "(integer '2')"),
                                 ImmutableList.of(new PlanNodeStatsAndCostSummary(2, 10, 0, 0, 0)),
                                 ImmutableList.of())))));
 
@@ -129,7 +132,7 @@ public class TestJsonRepresentation
         assertJsonRepresentation(
                 pb -> pb.aggregation(ab -> ab
                         .step(FINAL)
-                        .addAggregation(pb.symbol("sum", BIGINT), expression("sum(x)"), ImmutableList.of(BIGINT))
+                        .addAggregation(pb.symbol("sum", BIGINT), aggregation("sum", ImmutableList.of(new SymbolReference(BIGINT, "x"))), ImmutableList.of(BIGINT))
                         .singleGroupingSet(pb.symbol("y", BIGINT), pb.symbol("z", BIGINT))
                         .source(pb.values(pb.symbol("x", BIGINT), pb.symbol("y", BIGINT), pb.symbol("z", BIGINT)))),
                 new JsonRenderedNode(
@@ -143,7 +146,7 @@ public class TestJsonRepresentation
                                 typedSymbol("y", BIGINT),
                                 typedSymbol("z", BIGINT),
                                 typedSymbol("sum", BIGINT)),
-                        ImmutableList.of("sum := sum(\"x\")"),
+                        ImmutableList.of("sum := sum(x)"),
                         ImmutableList.of(),
                         ImmutableList.of(valuesRepresentation(
                                 "0",
@@ -161,14 +164,14 @@ public class TestJsonRepresentation
                         ImmutableList.of(new JoinNode.EquiJoinClause(pb.symbol("a", BIGINT), pb.symbol("d", BIGINT))),
                         ImmutableList.of(pb.symbol("b", BIGINT)),
                         ImmutableList.of(),
-                        Optional.of(expression("a < c")),
+                        Optional.of(new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "c"))),
                         Optional.empty(),
                         Optional.empty(),
                         ImmutableMap.of(new DynamicFilterId("DF"), pb.symbol("d", BIGINT))),
                 new JsonRenderedNode(
                         "2",
                         "InnerJoin",
-                        ImmutableMap.of("criteria", "(\"a\" = \"d\")", "filter", "(\"a\" < \"c\")", "hash", "[]"),
+                        ImmutableMap.of("criteria", "(a = d)", "filter", "(a < c)", "hash", "[]"),
                         ImmutableList.of(typedSymbol("b", BIGINT)),
                         ImmutableList.of("dynamicFilterAssignments = {d -> #DF}"),
                         ImmutableList.of(),
@@ -218,7 +221,6 @@ public class TestJsonRepresentation
             ValuePrinter valuePrinter = new ValuePrinter(queryRunner.getPlannerContext().getMetadata(), queryRunner.getPlannerContext().getFunctionManager(), transactionSession);
             String jsonRenderedNode = new PlanPrinter(
                     sourceNodeSupplier.apply(planBuilder),
-                    planBuilder.getTypes(),
                     scanNode -> TABLE_INFO,
                     ImmutableMap.of(),
                     valuePrinter,

@@ -71,7 +71,6 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-import static com.google.common.base.Predicates.alwaysFalse;
 import static com.google.common.base.Predicates.alwaysTrue;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -209,14 +208,14 @@ public class TransactionLogAccess
         invalidateAllIf(activeDataFileCache, cacheKey -> cacheKey.tableLocation().tableName().equals(schemaTableName));
     }
 
-    public MetadataEntry getMetadataEntry(TableSnapshot tableSnapshot, ConnectorSession session)
+    public MetadataEntry getMetadataEntry(ConnectorSession session, TableSnapshot tableSnapshot)
     {
         if (tableSnapshot.getCachedMetadata().isEmpty()) {
             try (Stream<MetadataEntry> metadataEntries = getEntries(
+                    session,
                     tableSnapshot,
                     METADATA,
                     entryStream -> entryStream.map(DeltaLakeTransactionLogEntry::getMetaData).filter(Objects::nonNull),
-                    session,
                     fileSystemFactory.create(session),
                     fileFormatDataSourceStats)) {
                 // Get last entry in the stream
@@ -227,48 +226,32 @@ public class TransactionLogAccess
                 .orElseThrow(() -> new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Metadata not found in transaction log for " + tableSnapshot.getTable()));
     }
 
-    // Deprecated in favor of the namesake method which allows checkpoint filtering
-    // to be able to perform partition pruning and stats projection on the `add` entries
-    // from the checkpoint.
-    /**
-     * @see #getActiveFiles(TableSnapshot, MetadataEntry, ProtocolEntry, TupleDomain, Optional, ConnectorSession)
-     */
-    @Deprecated
-    public Stream<AddFileEntry> getActiveFiles(TableSnapshot tableSnapshot, MetadataEntry metadataEntry, ProtocolEntry protocolEntry, ConnectorSession session)
+    public Stream<AddFileEntry> getActiveFiles(
+            ConnectorSession session,
+            TableSnapshot tableSnapshot,
+            MetadataEntry metadataEntry,
+            ProtocolEntry protocolEntry,
+            TupleDomain<DeltaLakeColumnHandle> partitionConstraint,
+            Set<DeltaLakeColumnHandle> projectedColumns)
     {
-        return retrieveActiveFiles(tableSnapshot, metadataEntry, protocolEntry, TupleDomain.all(), alwaysTrue(), session);
+        Set<String> baseColumnNames = projectedColumns.stream()
+                .filter(DeltaLakeColumnHandle::isBaseColumn) // Only base column stats are supported
+                .map(DeltaLakeColumnHandle::getColumnName)
+                .collect(toImmutableSet());
+        return getActiveFiles(session, tableSnapshot, metadataEntry, protocolEntry, partitionConstraint, baseColumnNames::contains);
     }
 
     public Stream<AddFileEntry> getActiveFiles(
+            ConnectorSession session,
             TableSnapshot tableSnapshot,
             MetadataEntry metadataEntry,
             ProtocolEntry protocolEntry,
             TupleDomain<DeltaLakeColumnHandle> partitionConstraint,
-            Optional<Set<DeltaLakeColumnHandle>> projectedColumns,
-            ConnectorSession session)
-    {
-        Predicate<String> addStatsMinMaxColumnFilter = alwaysFalse();
-        if (projectedColumns.isPresent()) {
-            Set<String> baseColumnNames = projectedColumns.get().stream()
-                    .filter(DeltaLakeColumnHandle::isBaseColumn) // Only base column stats are supported
-                    .map(DeltaLakeColumnHandle::getColumnName)
-                    .collect(toImmutableSet());
-            addStatsMinMaxColumnFilter = baseColumnNames::contains;
-        }
-        return retrieveActiveFiles(tableSnapshot, metadataEntry, protocolEntry, partitionConstraint, addStatsMinMaxColumnFilter, session);
-    }
-
-    private Stream<AddFileEntry> retrieveActiveFiles(
-            TableSnapshot tableSnapshot,
-            MetadataEntry metadataEntry,
-            ProtocolEntry protocolEntry,
-            TupleDomain<DeltaLakeColumnHandle> partitionConstraint,
-            Predicate<String> addStatsMinMaxColumnFilter,
-            ConnectorSession session)
+            Predicate<String> addStatsMinMaxColumnFilter)
     {
         try {
             if (isCheckpointFilteringEnabled(session)) {
-                return loadActiveFiles(tableSnapshot, metadataEntry, protocolEntry, partitionConstraint, addStatsMinMaxColumnFilter, session);
+                return loadActiveFiles(session, tableSnapshot, metadataEntry, protocolEntry, partitionConstraint, addStatsMinMaxColumnFilter);
             }
 
             TableVersion tableVersion = new TableVersion(new TableLocation(tableSnapshot.getTable(), tableSnapshot.getTableLocation()), tableSnapshot.getVersion());
@@ -299,7 +282,7 @@ public class TransactionLogAccess
                 }
 
                 List<AddFileEntry> activeFiles;
-                try (Stream<AddFileEntry> addFileEntryStream = loadActiveFiles(tableSnapshot, metadataEntry, protocolEntry, TupleDomain.all(), alwaysTrue(), session)) {
+                try (Stream<AddFileEntry> addFileEntryStream = loadActiveFiles(session, tableSnapshot, metadataEntry, protocolEntry, TupleDomain.all(), alwaysTrue())) {
                     activeFiles = addFileEntryStream.collect(toImmutableList());
                 }
                 return new DeltaLakeDataFileCacheEntry(tableSnapshot.getVersion(), activeFiles);
@@ -312,12 +295,12 @@ public class TransactionLogAccess
     }
 
     private Stream<AddFileEntry> loadActiveFiles(
+            ConnectorSession session,
             TableSnapshot tableSnapshot,
             MetadataEntry metadataEntry,
             ProtocolEntry protocolEntry,
             TupleDomain<DeltaLakeColumnHandle> partitionConstraint,
-            Predicate<String> addStatsMinMaxColumnFilter,
-            ConnectorSession session)
+            Predicate<String> addStatsMinMaxColumnFilter)
     {
         List<Transaction> transactions = tableSnapshot.getTransactions();
         try (Stream<DeltaLakeTransactionLogEntry> checkpointEntries = tableSnapshot.getCheckpointTransactionLogEntries(
@@ -390,13 +373,13 @@ public class TransactionLogAccess
         return Stream.concat(filteredCheckpointEntries, activeJsonEntries.values().stream());
     }
 
-    public Stream<RemoveFileEntry> getRemoveEntries(TableSnapshot tableSnapshot, ConnectorSession session)
+    public Stream<RemoveFileEntry> getRemoveEntries(ConnectorSession session, TableSnapshot tableSnapshot)
     {
         return getEntries(
+                session,
                 tableSnapshot,
                 REMOVE,
                 entryStream -> entryStream.map(DeltaLakeTransactionLogEntry::getRemove).filter(Objects::nonNull),
-                session,
                 fileSystemFactory.create(session),
                 fileFormatDataSourceStats);
     }
@@ -408,10 +391,10 @@ public class TransactionLogAccess
             Function<Stream<DeltaLakeTransactionLogEntry>, Stream<Object>> entryMapper)
     {
         try (Stream<Object> entries = getEntries(
+                session,
                 tableSnapshot,
                 entryTypes,
                 (checkpointStream, jsonStream) -> entryMapper.apply(Stream.concat(checkpointStream, jsonStream.stream().map(Transaction::transactionEntries).flatMap(Collection::stream))),
-                session,
                 fileSystemFactory.create(session),
                 fileFormatDataSourceStats)) {
             return entries.collect(toImmutableMap(Object::getClass, Function.identity(), (first, second) -> second));
@@ -420,30 +403,30 @@ public class TransactionLogAccess
 
     public ProtocolEntry getProtocolEntry(ConnectorSession session, TableSnapshot tableSnapshot)
     {
-        try (Stream<ProtocolEntry> protocolEntries = getProtocolEntries(tableSnapshot, session)) {
+        try (Stream<ProtocolEntry> protocolEntries = getProtocolEntries(session, tableSnapshot)) {
             return protocolEntries.reduce((first, second) -> second)
                     .orElseThrow(() -> new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Protocol entry not found in transaction log for table " + tableSnapshot.getTable()));
         }
     }
 
-    public Stream<ProtocolEntry> getProtocolEntries(TableSnapshot tableSnapshot, ConnectorSession session)
+    public Stream<ProtocolEntry> getProtocolEntries(ConnectorSession session, TableSnapshot tableSnapshot)
     {
         return getEntries(
+                session,
                 tableSnapshot,
                 PROTOCOL,
                 entryStream -> entryStream.map(DeltaLakeTransactionLogEntry::getProtocol).filter(Objects::nonNull),
-                session,
                 fileSystemFactory.create(session),
                 fileFormatDataSourceStats);
     }
 
-    public Stream<CommitInfoEntry> getCommitInfoEntries(TableSnapshot tableSnapshot, ConnectorSession session)
+    public Stream<CommitInfoEntry> getCommitInfoEntries(ConnectorSession session, TableSnapshot tableSnapshot)
     {
         return getEntries(
+                session,
                 tableSnapshot,
                 COMMIT,
                 entryStream -> entryStream.map(DeltaLakeTransactionLogEntry::getCommitInfo).filter(Objects::nonNull),
-                session,
                 fileSystemFactory.create(session),
                 fileFormatDataSourceStats);
     }
@@ -453,18 +436,18 @@ public class TransactionLogAccess
      * While {@link DeltaLakeTransactionLogEntry} has fields for multiple actions, only one can be populated in any instance.
      * We take advantage of that by only reading one column from the Parquet checkpoint.
      *
+     * @param session the current session
      * @param entryTypes A set of transaction log entry types to retrieve
      * @param entryMapper extracts and filters out the required elements from the TransactionLogEntries. Receives the actions from the checkpoint file, and the actions
      * from the JSON commits in chronological order
-     * @param session the current session
      * @param <T> the type of the action
      * @return an object that encapsulates a stream of actions
      */
     private <T> Stream<T> getEntries(
+            ConnectorSession session,
             TableSnapshot tableSnapshot,
             Set<CheckpointEntryIterator.EntryType> entryTypes,
             BiFunction<Stream<DeltaLakeTransactionLogEntry>, List<Transaction>, Stream<T>> entryMapper,
-            ConnectorSession session,
             TrinoFileSystem fileSystem,
             FileFormatDataSourceStats stats)
     {
@@ -487,18 +470,18 @@ public class TransactionLogAccess
      * Convenience method for accessors which don't need to separate out the checkpoint entries from the json entries.
      */
     private <T> Stream<T> getEntries(
+            ConnectorSession session,
             TableSnapshot tableSnapshot,
             CheckpointEntryIterator.EntryType entryType,
             Function<Stream<DeltaLakeTransactionLogEntry>, Stream<T>> entryMapper,
-            ConnectorSession session,
             TrinoFileSystem fileSystem,
             FileFormatDataSourceStats stats)
     {
         return getEntries(
+                session,
                 tableSnapshot,
                 ImmutableSet.of(entryType),
                 (checkpointStream, jsonStream) -> entryMapper.apply(Stream.concat(checkpointStream, jsonStream.stream().map(Transaction::transactionEntries).flatMap(Collection::stream))),
-                session,
                 fileSystem,
                 stats);
     }
@@ -617,23 +600,6 @@ public class TransactionLogAccess
         {
             return INSTANCE_SIZE +
                     tableLocation.getRetainedSizeInBytes();
-        }
-    }
-
-    private record QueriedLocation(String queryId, String tableLocation)
-    {
-        QueriedLocation
-        {
-            requireNonNull(queryId, "queryId is null");
-            requireNonNull(tableLocation, "tableLocation is null");
-        }
-    }
-
-    private record QueriedTable(QueriedLocation queriedLocation, long version)
-    {
-        QueriedTable
-        {
-            requireNonNull(queriedLocation, "queriedLocation is null");
         }
     }
 }

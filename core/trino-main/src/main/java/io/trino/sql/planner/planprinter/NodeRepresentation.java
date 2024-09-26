@@ -23,8 +23,6 @@ import io.trino.cost.PlanNodeStatsAndCostSummary;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.spi.type.Type;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
@@ -34,7 +32,6 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -46,7 +43,7 @@ public class NodeRepresentation
     private final Map<String, String> descriptor;
     private final List<TypedSymbol> outputs;
     private final List<PlanNodeId> children;
-    private final List<PlanFragmentId> remoteSources;
+    private final List<PlanNodeId> initialChildren;
     private final Optional<PlanNodeStats> stats;
     private final List<PlanNodeStatsEstimate> estimatedStats;
     private final List<PlanCostEstimate> estimatedCost;
@@ -65,7 +62,8 @@ public class NodeRepresentation
             List<PlanCostEstimate> estimatedCost,
             Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost,
             List<PlanNodeId> children,
-            List<PlanFragmentId> remoteSources)
+            // This is used in the case of adaptive plan node
+            List<PlanNodeId> initialChildren)
     {
         this.id = requireNonNull(id, "id is null");
         this.name = requireNonNull(name, "name is null");
@@ -77,7 +75,7 @@ public class NodeRepresentation
         this.estimatedCost = requireNonNull(estimatedCost, "estimatedCost is null");
         this.reorderJoinStatsAndCost = requireNonNull(reorderJoinStatsAndCost, "reorderJoinStatsAndCost is null");
         this.children = requireNonNull(children, "children is null");
-        this.remoteSources = requireNonNull(remoteSources, "remoteSources is null");
+        this.initialChildren = requireNonNull(initialChildren, "initialChildren is null");
 
         checkArgument(estimatedCost.size() == estimatedStats.size(), "size of cost and stats list does not match");
     }
@@ -123,9 +121,9 @@ public class NodeRepresentation
         return children;
     }
 
-    public List<PlanFragmentId> getRemoteSources()
+    public List<PlanNodeId> getInitialChildren()
     {
-        return remoteSources;
+        return initialChildren;
     }
 
     public List<String> getDetails()
@@ -161,9 +159,6 @@ public class NodeRepresentation
         }
 
         ImmutableList.Builder<PlanNodeStatsAndCostSummary> estimates = ImmutableList.builder();
-        TypeProvider typeProvider = TypeProvider.copyOf(outputs.stream()
-                .distinct()
-                .collect(toImmutableMap(TypedSymbol::getSymbol, TypedSymbol::getTrinoType)));
         for (int i = 0; i < getEstimatedStats().size(); i++) {
             PlanNodeStatsEstimate stats = getEstimatedStats().get(i);
             LocalCostEstimate cost = getEstimatedCost().get(i).getRootNodeLocalCostEstimate();
@@ -174,7 +169,7 @@ public class NodeRepresentation
 
             estimates.add(new PlanNodeStatsAndCostSummary(
                     stats.getOutputRowCount(),
-                    stats.getOutputSizeInBytes(outputSymbols, typeProvider),
+                    stats.getOutputSizeInBytes(outputSymbols),
                     cost.getCpuCost(),
                     cost.getMaxMemory(),
                     cost.getNetworkCost()));
@@ -183,6 +178,7 @@ public class NodeRepresentation
         return estimates.build();
     }
 
+    @Deprecated // TODO: replace with Symbol now that it carries a type
     public static class TypedSymbol
     {
         private final Symbol symbol;
@@ -214,7 +210,7 @@ public class NodeRepresentation
 
         public static TypedSymbol typedSymbol(String symbol, Type type)
         {
-            return new TypedSymbol(new Symbol(symbol), type);
+            return new TypedSymbol(new Symbol(type, symbol), type);
         }
 
         @Override

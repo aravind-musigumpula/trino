@@ -13,12 +13,22 @@
  */
 package io.trino.sql.query;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.assertions.BasePlanTest;
+import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.plan.FilterNode;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.LogicalExpression.Operator.OR;
 import static io.trino.sql.planner.LogicalPlanner.Stage.OPTIMIZED;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
@@ -109,14 +119,15 @@ public class TestFilteredAggregations
     @Test
     public void rewriteAddFilterWithMultipleFilters()
     {
+        PlanMatchPattern source = tableScan(
+                "orders", ImmutableMap.of("totalprice", "totalprice",
+                        "custkey", "custkey"));
         assertPlan(
                 "SELECT sum(totalprice) FILTER(WHERE totalprice > 0), sum(custkey) FILTER(WHERE custkey > 0) FROM orders",
                 anyTree(
                         filter(
-                                "(\"totalprice\" > 0E0 OR \"custkey\" > BIGINT '0')",
-                                tableScan(
-                                        "orders", ImmutableMap.of("totalprice", "totalprice",
-                                                "custkey", "custkey")))));
+                                new LogicalExpression(OR, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(DOUBLE, "totalprice"), new Constant(DOUBLE, 0.0)), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "custkey"), new Constant(BIGINT, 0L)))),
+                                source)));
     }
 
     @Test

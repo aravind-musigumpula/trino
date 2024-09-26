@@ -16,15 +16,29 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.function.OperatorType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.RowNumberSymbolMatcher;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.Assignments;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MODULUS;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
@@ -34,6 +48,9 @@ import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 public class TestPushPredicateThroughProjectIntoRowNumber
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction MODULUS_INTEGER = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(INTEGER, INTEGER));
+
     @Test
     public void testRowNumberSymbolPruned()
     {
@@ -42,7 +59,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("a = 1"),
+                            new ComparisonExpression(EQUAL, new SymbolReference(INTEGER, "a"), new Constant(INTEGER, 1L)),
                             p.project(
                                     Assignments.identity(a),
                                     p.rowNumber(
@@ -62,7 +79,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("a = BIGINT '1'"),
+                            new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "a"), new Constant(BIGINT, 1L)),
                             p.project(
                                     Assignments.identity(a, rowNumber),
                                     p.rowNumber(
@@ -82,7 +99,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("a = BIGINT '1' AND row_number < BIGINT '-10'"),
+                            new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "a"), new Constant(BIGINT, 1L)), new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, -10L)))),
                             p.project(
                                     Assignments.identity(a, rowNumber),
                                     p.rowNumber(
@@ -102,7 +119,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number > BIGINT '2' AND row_number < BIGINT '5'"),
+                            new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 2L)), new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)))),
                             p.project(
                                     Assignments.identity(rowNumber),
                                     p.rowNumber(
@@ -112,9 +129,9 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "row_number > BIGINT '2' AND row_number < BIGINT '5'",
+                        new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 2L)), new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)))),
                         project(
-                                ImmutableMap.of("row_number", expression("row_number")),
+                                ImmutableMap.of("row_number", io.trino.sql.planner.assertions.PlanMatchPattern.expression(new SymbolReference(BIGINT, "row_number"))),
                                 rowNumber(
                                         pattern -> pattern
                                                 .maxRowCountPerPartition(Optional.of(4)),
@@ -130,7 +147,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number > BIGINT '2' AND row_number < BIGINT '5'"),
+                            new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 2L)), new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)))),
                             p.project(
                                     Assignments.identity(rowNumber),
                                     p.rowNumber(
@@ -150,7 +167,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number < BIGINT '5'"),
+                            new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)),
                             p.project(
                                     Assignments.identity(rowNumber),
                                     p.rowNumber(
@@ -160,7 +177,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                                             p.values(a))));
                 })
                 .matches(project(
-                        ImmutableMap.of("row_number", expression("row_number")),
+                        ImmutableMap.of("row_number", io.trino.sql.planner.assertions.PlanMatchPattern.expression(new SymbolReference(BIGINT, "row_number"))),
                         rowNumber(
                                 pattern -> pattern
                                         .maxRowCountPerPartition(Optional.of(3)),
@@ -172,7 +189,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number < BIGINT '3'"),
+                            new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 3L)),
                             p.project(
                                     Assignments.identity(rowNumber),
                                     p.rowNumber(
@@ -182,7 +199,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                                             p.values(a))));
                 })
                 .matches(project(
-                        ImmutableMap.of("row_number", expression("row_number")),
+                        ImmutableMap.of("row_number", io.trino.sql.planner.assertions.PlanMatchPattern.expression(new SymbolReference(BIGINT, "row_number"))),
                         rowNumber(
                                 pattern -> pattern
                                         .maxRowCountPerPartition(Optional.of(2)),
@@ -198,7 +215,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number < BIGINT '5' AND a > BIGINT '0'"),
+                            new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "a"), new Constant(BIGINT, 0L)))),
                             p.project(
                                     Assignments.identity(rowNumber, a),
                                     p.rowNumber(
@@ -208,9 +225,9 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "a > BIGINT '0'",
+                        new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "a"), new Constant(BIGINT, 0L)),
                         project(
-                                ImmutableMap.of("row_number", expression("row_number"), "a", expression("a")),
+                                ImmutableMap.of("row_number", expression(new SymbolReference(BIGINT, "row_number")), "a", expression(new SymbolReference(BIGINT, "a"))),
                                 rowNumber(
                                         pattern -> pattern
                                                 .maxRowCountPerPartition(Optional.of(3)),
@@ -222,7 +239,7 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumber = p.symbol("row_number");
                     return p.filter(
-                            PlanBuilder.expression("row_number < BIGINT '5' AND row_number % 2 = BIGINT '0'"),
+                            new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)), new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(MODULUS_INTEGER, MODULUS, new SymbolReference(INTEGER, "row_number"), new Constant(INTEGER, 2L)), new Constant(BIGINT, 0L)))),
                             p.project(
                                     Assignments.identity(rowNumber),
                                     p.rowNumber(
@@ -232,9 +249,9 @@ public class TestPushPredicateThroughProjectIntoRowNumber
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "row_number % 2 = BIGINT '0'",
+                        new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(MODULUS_INTEGER, MODULUS, new SymbolReference(INTEGER, "row_number"), new Constant(INTEGER, 2L)), new Constant(BIGINT, 0L)),
                         project(
-                                ImmutableMap.of("row_number", expression("row_number")),
+                                ImmutableMap.of("row_number", io.trino.sql.planner.assertions.PlanMatchPattern.expression(new SymbolReference(BIGINT, "row_number"))),
                                 rowNumber(
                                         pattern -> pattern
                                                 .maxRowCountPerPartition(Optional.of(3)),

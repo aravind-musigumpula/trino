@@ -15,6 +15,11 @@ package io.trino.plugin.geospatial;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.iterative.rule.RewriteSpatialPartitioningAggregation;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
@@ -24,6 +29,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.trino.plugin.geospatial.GeometryType.GEOMETRY;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregationFunction;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -33,6 +39,9 @@ import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 public class TestRewriteSpatialPartitioningAggregation
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution(new GeoPlugin());
+    private static final ResolvedFunction ST_ENVELOPE = FUNCTIONS.resolveFunction("st_envelope", fromTypes(GEOMETRY));
+
     public TestRewriteSpatialPartitioningAggregation()
     {
         super(new GeoPlugin());
@@ -45,7 +54,7 @@ public class TestRewriteSpatialPartitioningAggregation
                 .on(p -> p.aggregation(a ->
                         a.globalGrouping()
                                 .step(AggregationNode.Step.SINGLE)
-                                .addAggregation(p.symbol("sp"), PlanBuilder.expression("spatial_partitioning(geometry, n)"), ImmutableList.of(GEOMETRY, INTEGER))
+                                .addAggregation(p.symbol("sp"), PlanBuilder.aggregation("spatial_partitioning", ImmutableList.of(new SymbolReference(GEOMETRY, "geometry"), new SymbolReference(INTEGER, "n"))), ImmutableList.of(GEOMETRY, INTEGER))
                                 .source(p.values(p.symbol("geometry"), p.symbol("n")))))
                 .doesNotFire();
     }
@@ -57,28 +66,28 @@ public class TestRewriteSpatialPartitioningAggregation
                 .on(p -> p.aggregation(a ->
                         a.globalGrouping()
                                 .step(AggregationNode.Step.SINGLE)
-                                .addAggregation(p.symbol("sp"), PlanBuilder.expression("spatial_partitioning(geometry)"), ImmutableList.of(GEOMETRY))
+                                .addAggregation(p.symbol("sp"), PlanBuilder.aggregation("spatial_partitioning", ImmutableList.of(new SymbolReference(GEOMETRY, "geometry"))), ImmutableList.of(GEOMETRY))
                                 .source(p.values(p.symbol("geometry")))))
                 .matches(
                         aggregation(
                                 ImmutableMap.of("sp", aggregationFunction("spatial_partitioning", ImmutableList.of("envelope", "partition_count"))),
                                 project(
-                                        ImmutableMap.of("partition_count", expression("100"),
-                                                "envelope", expression("ST_Envelope(geometry)")),
+                                        ImmutableMap.of("partition_count", expression(new Constant(INTEGER, 100L)),
+                                                "envelope", expression(new FunctionCall(ST_ENVELOPE, ImmutableList.of(new SymbolReference(GEOMETRY, "geometry"))))),
                                         values("geometry"))));
 
         assertRuleApplication()
                 .on(p -> p.aggregation(a ->
                         a.globalGrouping()
                                 .step(AggregationNode.Step.SINGLE)
-                                .addAggregation(p.symbol("sp"), PlanBuilder.expression("spatial_partitioning(envelope)"), ImmutableList.of(GEOMETRY))
+                                .addAggregation(p.symbol("sp"), PlanBuilder.aggregation("spatial_partitioning", ImmutableList.of(new SymbolReference(GEOMETRY, "envelope"))), ImmutableList.of(GEOMETRY))
                                 .source(p.values(p.symbol("envelope")))))
                 .matches(
                         aggregation(
                                 ImmutableMap.of("sp", aggregationFunction("spatial_partitioning", ImmutableList.of("envelope", "partition_count"))),
                                 project(
-                                        ImmutableMap.of("partition_count", expression("100"),
-                                                "envelope", expression("ST_Envelope(geometry)")),
+                                        ImmutableMap.of("partition_count", expression(new Constant(INTEGER, 100L)),
+                                                "envelope", expression(new FunctionCall(ST_ENVELOPE, ImmutableList.of(new SymbolReference(GEOMETRY, "geometry"))))),
                                         values("geometry"))));
     }
 

@@ -19,18 +19,19 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.trino.Session;
 import io.trino.cost.StatsProvider;
 import io.trino.metadata.Metadata;
+import io.trino.spi.type.Type;
 import io.trino.sql.DynamicFilters;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.NotExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.JoinNode.DistributionType;
 import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.PlanNode;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.NotExpression;
 
 import java.util.HashSet;
 import java.util.List;
@@ -44,14 +45,14 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.operator.join.JoinUtils.getJoinDynamicFilters;
 import static io.trino.sql.DynamicFilters.extractDynamicFilters;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.IS_DISTINCT_FROM;
 import static io.trino.sql.planner.ExpressionExtractor.extractExpressions;
 import static io.trino.sql.planner.assertions.MatchResult.NO_MATCH;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.DynamicFilterPattern;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
-import static io.trino.sql.tree.ComparisonExpression.Operator.EQUAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.IS_DISTINCT_FROM;
 import static java.util.Objects.requireNonNull;
 
 public final class JoinMatcher
@@ -212,7 +213,7 @@ public final class JoinMatcher
         private Optional<Boolean> expectedSpillable = Optional.empty();
         private PlanMatchPattern left;
         private PlanMatchPattern right;
-        private Optional<String> filter = Optional.empty();
+        private Optional<Expression> filter = Optional.empty();
         private boolean ignoreEquiCriteria;
 
         public Builder(JoinType joinType)
@@ -237,7 +238,7 @@ public final class JoinMatcher
         }
 
         @CanIgnoreReturnValue
-        public Builder filter(String expectedFilter)
+        public Builder filter(Expression expectedFilter)
         {
             this.filter = Optional.of(expectedFilter);
 
@@ -245,7 +246,7 @@ public final class JoinMatcher
         }
 
         @CanIgnoreReturnValue
-        public Builder dynamicFilter(Map<String, String> expectedDynamicFilter)
+        public Builder dynamicFilter(Map<Expression, String> expectedDynamicFilter)
         {
             this.dynamicFilter = Optional.of(expectedDynamicFilter.entrySet().stream()
                     .map(entry -> new PlanMatchPattern.DynamicFilterPattern(entry.getKey(), EQUAL, entry.getValue()))
@@ -255,9 +256,9 @@ public final class JoinMatcher
         }
 
         @CanIgnoreReturnValue
-        public Builder dynamicFilter(String key, String value)
+        public Builder dynamicFilter(Type type, String key, String value)
         {
-            this.dynamicFilter = Optional.of(ImmutableList.of(new PlanMatchPattern.DynamicFilterPattern(key, EQUAL, value)));
+            this.dynamicFilter = Optional.of(ImmutableList.of(new PlanMatchPattern.DynamicFilterPattern(new SymbolReference(type, key), EQUAL, value)));
 
             return this;
         }
@@ -316,7 +317,7 @@ public final class JoinMatcher
                                     joinType,
                                     equiCriteria.orElse(ImmutableList.of()),
                                     ignoreEquiCriteria,
-                                    filter.map(PlanBuilder::expression),
+                                    filter,
                                     distributionType,
                                     expectedSpillable,
                                     dynamicFilter));

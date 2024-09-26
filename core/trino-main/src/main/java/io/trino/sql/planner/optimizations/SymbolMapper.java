@@ -16,6 +16,11 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.ExpressionRewriter;
+import io.trino.sql.ir.ExpressionTreeRewriter;
+import io.trino.sql.ir.LambdaExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
@@ -52,10 +57,6 @@ import io.trino.sql.planner.rowpattern.MatchNumberValuePointer;
 import io.trino.sql.planner.rowpattern.ScalarValuePointer;
 import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.ExpressionRewriter;
-import io.trino.sql.tree.ExpressionTreeRewriter;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -155,6 +156,21 @@ public class SymbolMapper
             {
                 Symbol canonical = map(Symbol.from(node));
                 return canonical.toSymbolReference();
+            }
+
+            @Override
+            public Expression rewriteLambdaExpression(LambdaExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            {
+                List<Symbol> arguments = node.getArguments().stream()
+                        .map(symbol -> map(new Symbol(symbol.getType(), symbol.getName())))
+                        .collect(toImmutableList());
+
+                Expression body = treeRewriter.rewrite(node.getBody(), context);
+                if (body != node.getBody()) {
+                    return new LambdaExpression(arguments, body);
+                }
+
+                return node;
             }
         }, expression);
     }
@@ -259,9 +275,7 @@ public class SymbolMapper
                 frame.getSortKeyCoercedForFrameStartComparison().map(this::map),
                 frame.getEndType(),
                 frame.getEndValue().map(this::map),
-                frame.getSortKeyCoercedForFrameEndComparison().map(this::map),
-                frame.getOriginalStartValue(),
-                frame.getOriginalEndValue());
+                frame.getSortKeyCoercedForFrameEndComparison().map(this::map));
     }
 
     private SpecificationWithPreSortedPrefix mapAndDistinct(DataOrganizationSpecification specification, int preSorted)

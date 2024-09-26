@@ -15,13 +15,25 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
 import io.trino.Session;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorTableHandle;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.DoubleType;
+import io.trino.spi.function.OperatorType;
+import io.trino.spi.type.Decimals;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.InPredicate;
+import io.trino.sql.ir.SearchedCaseExpression;
+import io.trino.sql.ir.SymbolReference;
+import io.trino.sql.ir.WhenClause;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.assertions.AggregationFunction;
 import io.trino.sql.planner.assertions.BasePlanTest;
@@ -33,6 +45,7 @@ import io.trino.testing.PlanTester;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -40,8 +53,17 @@ import static io.trino.SystemSessionProperties.OPTIMIZE_HASH_GENERATION;
 import static io.trino.SystemSessionProperties.PREFER_PARTIAL_AGGREGATION;
 import static io.trino.SystemSessionProperties.TASK_CONCURRENCY;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MODULUS;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MULTIPLY;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregationFunction;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
@@ -59,6 +81,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestPreAggregateCaseAggregations
         extends BasePlanTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction CONCAT = FUNCTIONS.resolveFunction("concat", fromTypes(VARCHAR, VARCHAR));
+    private static final ResolvedFunction MULTIPLY_BIGINT = FUNCTIONS.resolveOperator(OperatorType.MULTIPLY, ImmutableList.of(BIGINT, BIGINT));
+    private static final ResolvedFunction MODULUS_BIGINT = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(BIGINT, BIGINT));
+    private static final ResolvedFunction MULTIPLY_DECIMAL_10_0 = FUNCTIONS.resolveOperator(OperatorType.MULTIPLY, ImmutableList.of(createDecimalType(10), createDecimalType(10)));
+
     private static final SchemaTableName TABLE = new SchemaTableName("default", "t");
 
     @Override
@@ -84,9 +112,9 @@ public class TestPreAggregateCaseAggregations
                             new ColumnMetadata("col_varchar", VARCHAR),
                             new ColumnMetadata("col_bigint", BIGINT),
                             new ColumnMetadata("col_tinyint", TINYINT),
-                            new ColumnMetadata("col_decimal", DecimalType.createDecimalType(2, 1)),
-                            new ColumnMetadata("col_long_decimal", DecimalType.createDecimalType(19, 18)),
-                            new ColumnMetadata("col_double", DoubleType.DOUBLE));
+                            new ColumnMetadata("col_decimal", createDecimalType(2, 1)),
+                            new ColumnMetadata("col_long_decimal", createDecimalType(19, 18)),
+                            new ColumnMetadata("col_double", DOUBLE));
                 });
         planTester.createCatalog("local", builder.build(), ImmutableMap.of());
 
@@ -109,7 +137,7 @@ public class TestPreAggregateCaseAggregations
                         "GROUP BY (col_varchar || 'a')",
                 anyTree(
                         project(
-                                ImmutableMap.of("SUM_2_CAST", expression("CAST(SUM_2 AS VARCHAR(10))")),
+                                ImmutableMap.of("SUM_2_CAST", expression(new Cast(new SymbolReference(BIGINT, "SUM_2"), createVarcharType(10)))),
                                 aggregation(
                                         singleGroupingSet("KEY"),
                                         ImmutableMap.<Optional<String>, ExpectedValueProvider<AggregationFunction>>builder()
@@ -123,12 +151,12 @@ public class TestPreAggregateCaseAggregations
                                         Optional.empty(),
                                         SINGLE,
                                         project(ImmutableMap.<String, ExpressionMatcher>builder()
-                                                        .put("SUM_1_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_BIGINT ELSE BIGINT '0' END"))
-                                                        .put("SUM_2_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_INT_CAST ELSE BIGINT '0' END"))
-                                                        .put("SUM_3_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '2' THEN SUM_BIGINT END"))
-                                                        .put("MIN_1_INPUT", expression("CASE WHEN COL_BIGINT % BIGINT '2' > BIGINT '1' THEN MIN_BIGINT END"))
-                                                        .put("SUM_4_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '3' THEN SUM_DECIMAL END"))
-                                                        .put("SUM_5_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '4' THEN SUM_DECIMAL_CAST END"))
+                                                        .put("SUM_1_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                        .put("SUM_2_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_INT_CAST"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                        .put("SUM_3_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.empty())))
+                                                        .put("MIN_1_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(MODULUS_BIGINT, MODULUS, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "MIN_BIGINT"))), Optional.empty())))
+                                                        .put("SUM_4_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 3L)), new SymbolReference(BIGINT, "SUM_DECIMAL"))), Optional.empty())))
+                                                        .put("SUM_5_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new SymbolReference(BIGINT, "SUM_DECIMAL_CAST"))), Optional.empty())))
                                                         .buildOrThrow(),
                                                 aggregation(
                                                         singleGroupingSet("KEY", "COL_BIGINT"),
@@ -142,11 +170,11 @@ public class TestPreAggregateCaseAggregations
                                                         SINGLE,
                                                         exchange(
                                                                 project(ImmutableMap.of(
-                                                                                "KEY", expression("CONCAT(COL_VARCHAR, VARCHAR 'a')"),
-                                                                                "VALUE_BIGINT", expression("(CASE WHEN (COL_BIGINT IN (BIGINT '1', BIGINT '2')) THEN (COL_BIGINT * BIGINT '2') END)"),
-                                                                                "VALUE_INT_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '1') THEN CAST(CAST((COL_BIGINT * BIGINT '2') AS INTEGER) AS bigint) END)"),
-                                                                                "VALUE_2_BIGINT", expression("(CASE WHEN ((COL_BIGINT % BIGINT '2') > BIGINT '1') THEN (COL_BIGINT * BIGINT '2') END)"),
-                                                                                "VALUE_DECIMAL_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '4') THEN CAST((COL_DECIMAL * CAST(DECIMAL '2' AS decimal(10, 0))) AS bigint) END)")),
+                                                                                "KEY", expression(new FunctionCall(CONCAT, ImmutableList.of(new SymbolReference(VARCHAR, "COL_VARCHAR"), new Constant(VARCHAR, Slices.utf8Slice("a"))))),
+                                                                                "VALUE_BIGINT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new InPredicate(new SymbolReference(BIGINT, "COL_BIGINT"), ImmutableList.of(new Constant(BIGINT, 1L), new Constant(BIGINT, 2L))), new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)))), Optional.empty())),
+                                                                                "VALUE_INT_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new Cast(new Cast(new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), INTEGER), BIGINT))), Optional.empty())),
+                                                                                "VALUE_2_BIGINT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(MODULUS_BIGINT, MODULUS, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)), new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)))), Optional.empty())),
+                                                                                "VALUE_DECIMAL_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new Cast(new ArithmeticBinaryExpression(MULTIPLY_DECIMAL_10_0, MULTIPLY, new SymbolReference(createDecimalType(10, 0), "COL_DECIMAL"), new Constant(createDecimalType(10, 0), Decimals.valueOfShort(new BigDecimal("2")))), BIGINT))), Optional.empty()))),
                                                                         tableScan(
                                                                                 "t",
                                                                                 ImmutableMap.of(
@@ -169,7 +197,7 @@ public class TestPreAggregateCaseAggregations
                         "FROM t",
                 anyTree(
                         project(
-                                ImmutableMap.of("SUM_2_CAST", expression("CAST(SUM_2 AS VARCHAR(10))")),
+                                ImmutableMap.of("SUM_2_CAST", expression(new Cast(new SymbolReference(BIGINT, "SUM_2"), createVarcharType(10)))),
                                 aggregation(
                                         globalAggregation(),
                                         ImmutableMap.<Optional<String>, ExpectedValueProvider<AggregationFunction>>builder()
@@ -183,12 +211,12 @@ public class TestPreAggregateCaseAggregations
                                         Optional.empty(),
                                         SINGLE,
                                         project(ImmutableMap.<String, ExpressionMatcher>builder()
-                                                        .put("SUM_1_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_BIGINT ELSE BIGINT '0' END"))
-                                                        .put("SUM_2_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_INT_CAST ELSE BIGINT '0' END"))
-                                                        .put("SUM_3_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '2' THEN SUM_BIGINT END"))
-                                                        .put("MIN_1_INPUT", expression("CASE WHEN COL_BIGINT % BIGINT '2' > BIGINT '1' THEN MIN_BIGINT END"))
-                                                        .put("SUM_4_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '3' THEN SUM_DECIMAL END"))
-                                                        .put("SUM_5_INPUT", expression("CASE WHEN COL_BIGINT = BIGINT '4' THEN SUM_DECIMAL_CAST END"))
+                                                        .put("SUM_1_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                        .put("SUM_2_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_INT_CAST"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                        .put("SUM_3_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.empty())))
+                                                        .put("MIN_1_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(MODULUS_BIGINT, MODULUS, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "MIN_BIGINT"))), Optional.empty())))
+                                                        .put("SUM_4_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 3L)), new SymbolReference(BIGINT, "SUM_DECIMAL"))), Optional.empty())))
+                                                        .put("SUM_5_INPUT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new SymbolReference(BIGINT, "SUM_DECIMAL_CAST"))), Optional.empty())))
                                                         .buildOrThrow(),
                                                 aggregation(
                                                         singleGroupingSet("COL_BIGINT"),
@@ -202,10 +230,10 @@ public class TestPreAggregateCaseAggregations
                                                         SINGLE,
                                                         exchange(
                                                                 project(ImmutableMap.of(
-                                                                                "VALUE_BIGINT", expression("(CASE WHEN (COL_BIGINT IN (BIGINT '1', BIGINT '2')) THEN (COL_BIGINT * BIGINT '2') END)"),
-                                                                                "VALUE_INT_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '1') THEN CAST(CAST((COL_BIGINT * BIGINT '2') AS INTEGER) AS bigint) END)"),
-                                                                                "VALUE_2_INT_CAST", expression("(CASE WHEN ((COL_BIGINT % BIGINT '2') > BIGINT '1') THEN (COL_BIGINT * BIGINT '2') END)"),
-                                                                                "VALUE_DECIMAL_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '4') THEN CAST((COL_DECIMAL * CAST(DECIMAL '2' AS decimal(10, 0))) AS bigint) END)")),
+                                                                                "VALUE_BIGINT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new InPredicate(new SymbolReference(BIGINT, "COL_BIGINT"), ImmutableList.of(new Constant(BIGINT, 1L), new Constant(BIGINT, 2L))), new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)))), Optional.empty())),
+                                                                                "VALUE_INT_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new Cast(new Cast(new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), INTEGER), BIGINT))), Optional.empty())),
+                                                                                "VALUE_2_INT_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(MODULUS_BIGINT, MODULUS, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)), new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)))), Optional.empty())),
+                                                                                "VALUE_DECIMAL_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new Cast(new ArithmeticBinaryExpression(MULTIPLY_DECIMAL_10_0, MULTIPLY, new SymbolReference(createDecimalType(10, 0), "COL_DECIMAL"), new Constant(createDecimalType(10, 0), Decimals.valueOfShort(new BigDecimal("2")))), BIGINT))), Optional.empty()))),
                                                                         tableScan(
                                                                                 "t",
                                                                                 ImmutableMap.of(
@@ -251,18 +279,18 @@ public class TestPreAggregateCaseAggregations
                                 Optional.empty(),
                                 SINGLE,
                                 project(ImmutableMap.<String, ExpressionMatcher>builder()
-                                                .put("SUM_BIGINT_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_BIGINT END"))
-                                                .put("SUM_BIGINT_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '1' THEN SUM_BIGINT ELSE BIGINT '0' END"))
-                                                .put("SUM_INT_CAST_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '2' THEN SUM_INT_CAST END"))
-                                                .put("SUM_INT_CAST_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '2' THEN SUM_INT_CAST ELSE BIGINT '0' END"))
-                                                .put("SUM_TINYINT_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '3' THEN SUM_TINYINT END"))
-                                                .put("SUM_TINYINT_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '3' THEN SUM_TINYINT ELSE BIGINT '0' END"))
-                                                .put("SUM_DECIMAL_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '4' THEN SUM_DECIMAL END"))
-                                                .put("SUM_DECIMAL_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '4' THEN SUM_DECIMAL ELSE CAST(DECIMAL '0.0' AS decimal(38, 1)) END"))
-                                                .put("SUM_LONG_DECIMAL_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '5' THEN SUM_LONG_DECIMAL END"))
-                                                .put("SUM_LONG_DECIMAL_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '5' THEN SUM_LONG_DECIMAL ELSE CAST(DECIMAL '0.000000000000000000' AS decimal(38, 18)) END"))
-                                                .put("SUM_DOUBLE_FINAL", expression("CASE WHEN COL_BIGINT = BIGINT '6' THEN SUM_DOUBLE END"))
-                                                .put("SUM_DOUBLE_FINAL_DEFAULT", expression("CASE WHEN COL_BIGINT = BIGINT '6' THEN SUM_DOUBLE ELSE 0E0 END"))
+                                                .put("SUM_BIGINT_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.empty())))
+                                                .put("SUM_BIGINT_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 1L)), new SymbolReference(BIGINT, "SUM_BIGINT"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                .put("SUM_INT_CAST_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new SymbolReference(BIGINT, "SUM_INT_CAST"))), Optional.empty())))
+                                                .put("SUM_INT_CAST_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new SymbolReference(BIGINT, "SUM_INT_CAST"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                .put("SUM_TINYINT_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 3L)), new SymbolReference(TINYINT, "SUM_TINYINT"))), Optional.empty())))
+                                                .put("SUM_TINYINT_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 3L)), new SymbolReference(TINYINT, "SUM_TINYINT"))), Optional.of(new Constant(BIGINT, 0L)))))
+                                                .put("SUM_DECIMAL_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new SymbolReference(BIGINT, "SUM_DECIMAL"))), Optional.empty())))
+                                                .put("SUM_DECIMAL_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 4L)), new SymbolReference(BIGINT, "SUM_DECIMAL"))), Optional.of(new Constant(createDecimalType(38, 1), Decimals.valueOf(new BigDecimal("0.0")))))))
+                                                .put("SUM_LONG_DECIMAL_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 5L)), new SymbolReference(BIGINT, "SUM_LONG_DECIMAL"))), Optional.empty())))
+                                                .put("SUM_LONG_DECIMAL_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 5L)), new SymbolReference(BIGINT, "SUM_LONG_DECIMAL"))), Optional.of(new Constant(createDecimalType(38, 18), Decimals.valueOf(new BigDecimal("0.000000000000000000")))))))
+                                                .put("SUM_DOUBLE_FINAL", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 6L)), new SymbolReference(DOUBLE, "SUM_DOUBLE"))), Optional.empty())))
+                                                .put("SUM_DOUBLE_FINAL_DEFAULT", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 6L)), new SymbolReference(DOUBLE, "SUM_DOUBLE"))), Optional.of(new Constant(DOUBLE, 0.0)))))
                                                 .buildOrThrow(),
                                         aggregation(
                                                 singleGroupingSet("COL_BIGINT"),
@@ -277,8 +305,8 @@ public class TestPreAggregateCaseAggregations
                                                 SINGLE,
                                                 exchange(
                                                         project(ImmutableMap.of(
-                                                                        "VALUE_INT_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '2') THEN CAST(CAST(COL_BIGINT AS INTEGER) AS bigint) END)"),
-                                                                        "VALUE_TINYINT_CAST", expression("(CASE WHEN (COL_BIGINT = BIGINT '3') THEN CAST(COL_TINYINT AS bigint) END)")),
+                                                                        "VALUE_INT_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 2L)), new Cast(new Cast(new SymbolReference(BIGINT, "COL_BIGINT"), INTEGER), BIGINT))), Optional.empty())),
+                                                                        "VALUE_TINYINT_CAST", expression(new SearchedCaseExpression(ImmutableList.of(new WhenClause(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "COL_BIGINT"), new Constant(BIGINT, 3L)), new Cast(new SymbolReference(TINYINT, "COL_TINYINT"), BIGINT))), Optional.empty()))),
                                                                 tableScan(
                                                                         "t",
                                                                         ImmutableMap.of(

@@ -28,34 +28,26 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.InterpretedFunctionInvoker;
 import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.BetweenPredicate;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.ExpressionTreeRewriter;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.IsNullPredicate;
+import io.trino.sql.ir.NotExpression;
 import io.trino.sql.planner.IrExpressionInterpreter;
-import io.trino.sql.planner.IrTypeAnalyzer;
-import io.trino.sql.planner.LiteralEncoder;
 import io.trino.sql.planner.NoOpSymbolResolver;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.tree.BetweenPredicate;
-import io.trino.sql.tree.Cast;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.ExpressionTreeRewriter;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.IsNotNullPredicate;
-import io.trino.sql.tree.IsNullPredicate;
-import io.trino.sql.tree.NodeRef;
-import io.trino.sql.tree.NotExpression;
-import io.trino.sql.tree.NullLiteral;
 
 import java.lang.invoke.MethodHandle;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
-import static io.trino.metadata.ResolvedFunction.extractFunctionName;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
@@ -63,16 +55,14 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
-import static io.trino.sql.ir.IrUtils.isEffectivelyLiteral;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.IrUtils.or;
 import static io.trino.sql.planner.iterative.rule.UnwrapCastInComparison.falseIfNotNull;
 import static io.trino.sql.planner.iterative.rule.UnwrapCastInComparison.trueIfNotNull;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static io.trino.type.DateTimes.PICOSECONDS_PER_MICROSECOND;
 import static io.trino.type.DateTimes.scaleFactor;
 import static java.lang.Math.floorDiv;
@@ -101,46 +91,37 @@ import static java.util.Objects.requireNonNull;
 public class UnwrapDateTruncInComparison
         extends ExpressionRewriteRuleSet
 {
-    public UnwrapDateTruncInComparison(PlannerContext plannerContext, IrTypeAnalyzer typeAnalyzer)
+    public UnwrapDateTruncInComparison(PlannerContext plannerContext)
     {
-        super(createRewrite(plannerContext, typeAnalyzer));
+        super(createRewrite(plannerContext));
     }
 
-    private static ExpressionRewriter createRewrite(PlannerContext plannerContext, IrTypeAnalyzer typeAnalyzer)
+    private static ExpressionRewriter createRewrite(PlannerContext plannerContext)
     {
         requireNonNull(plannerContext, "plannerContext is null");
-        requireNonNull(typeAnalyzer, "typeAnalyzer is null");
 
-        return (expression, context) -> unwrapDateTrunc(context.getSession(), plannerContext, typeAnalyzer, context.getSymbolAllocator().getTypes(), expression);
+        return (expression, context) -> unwrapDateTrunc(context.getSession(), plannerContext, expression);
     }
 
     private static Expression unwrapDateTrunc(Session session,
             PlannerContext plannerContext,
-            IrTypeAnalyzer typeAnalyzer,
-            TypeProvider types,
             Expression expression)
     {
-        return ExpressionTreeRewriter.rewriteWith(new Visitor(plannerContext, typeAnalyzer, session, types), expression);
+        return ExpressionTreeRewriter.rewriteWith(new Visitor(plannerContext, session), expression);
     }
 
     private static class Visitor
-            extends io.trino.sql.tree.ExpressionRewriter<Void>
+            extends io.trino.sql.ir.ExpressionRewriter<Void>
     {
         private final PlannerContext plannerContext;
-        private final IrTypeAnalyzer typeAnalyzer;
         private final Session session;
-        private final TypeProvider types;
         private final InterpretedFunctionInvoker functionInvoker;
-        private final LiteralEncoder literalEncoder;
 
-        public Visitor(PlannerContext plannerContext, IrTypeAnalyzer typeAnalyzer, Session session, TypeProvider types)
+        public Visitor(PlannerContext plannerContext, Session session)
         {
             this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
-            this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
             this.session = requireNonNull(session, "session is null");
-            this.types = requireNonNull(types, "types is null");
             this.functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
-            this.literalEncoder = new LiteralEncoder(plannerContext);
         }
 
         @Override
@@ -157,35 +138,34 @@ public class UnwrapDateTruncInComparison
             // This is provided by CanonicalizeExpressionRewriter.
 
             if (!(expression.getLeft() instanceof FunctionCall call) ||
-                    !extractFunctionName(call.getName()).equals(builtinFunctionName("date_trunc")) ||
+                    !call.getFunction().getName().equals(builtinFunctionName("date_trunc")) ||
                     call.getArguments().size() != 2) {
                 return expression;
             }
 
-            Map<NodeRef<Expression>, Type> expressionTypes = typeAnalyzer.getTypes(session, types, expression);
             Expression unitExpression = call.getArguments().get(0);
-            if (!(expressionTypes.get(NodeRef.of(unitExpression)) instanceof VarcharType) || !isEffectivelyLiteral(plannerContext, session, unitExpression)) {
+            if (!(unitExpression.type() instanceof VarcharType) || !(unitExpression instanceof Constant)) {
                 return expression;
             }
-            Slice unitName = (Slice) new IrExpressionInterpreter(unitExpression, plannerContext, session, expressionTypes)
+            Slice unitName = (Slice) new IrExpressionInterpreter(unitExpression, plannerContext, session)
                     .optimize(NoOpSymbolResolver.INSTANCE);
             if (unitName == null) {
                 return expression;
             }
 
             Expression argument = call.getArguments().get(1);
-            Type argumentType = expressionTypes.get(NodeRef.of(argument));
+            Type argumentType = argument.type();
 
-            Type rightType = expressionTypes.get(NodeRef.of(expression.getRight()));
+            Type rightType = expression.right().type();
             verify(argumentType.equals(rightType), "Mismatched types: %s and %s", argumentType, rightType);
 
-            Object right = new IrExpressionInterpreter(expression.getRight(), plannerContext, session, expressionTypes)
+            Object right = new IrExpressionInterpreter(expression.getRight(), plannerContext, session)
                     .optimize(NoOpSymbolResolver.INSTANCE);
 
-            if (right == null || right instanceof NullLiteral) {
+            if (right == null) {
                 return switch (expression.getOperator()) {
-                    case EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> new Cast(new NullLiteral(), toSqlType(BOOLEAN));
-                    case IS_DISTINCT_FROM -> new IsNotNullPredicate(argument);
+                    case EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> new Constant(BOOLEAN, null);
+                    case IS_DISTINCT_FROM -> new NotExpression(new IsNullPredicate(argument));
                 };
             }
 
@@ -198,7 +178,7 @@ public class UnwrapDateTruncInComparison
                 return expression;
             }
 
-            ResolvedFunction resolvedFunction = plannerContext.getMetadata().decodeFunction(call.getName());
+            ResolvedFunction resolvedFunction = call.getFunction();
 
             Optional<SupportedUnit> unitIfSupported = Enums.getIfPresent(SupportedUnit.class, unitName.toStringUtf8().toUpperCase(Locale.ENGLISH)).toJavaUtil();
             if (unitIfSupported.isEmpty()) {
@@ -238,17 +218,21 @@ public class UnwrapDateTruncInComparison
                 }
                 case LESS_THAN -> {
                     if (rightValueAtRangeLow) {
-                        yield new ComparisonExpression(LESS_THAN, argument, toExpression(rangeLow, rightType));
+                        yield new ComparisonExpression(LESS_THAN, argument, new Constant(rightType, rangeLow));
                     }
-                    yield new ComparisonExpression(LESS_THAN_OR_EQUAL, argument, toExpression(calculateRangeEndInclusive(rangeLow, rightType, unit), rightType));
+                    yield new ComparisonExpression(LESS_THAN_OR_EQUAL, argument, new Constant(rightType, calculateRangeEndInclusive(rangeLow, rightType, unit)));
                 }
-                case LESS_THAN_OR_EQUAL -> new ComparisonExpression(LESS_THAN_OR_EQUAL, argument, toExpression(calculateRangeEndInclusive(rangeLow, rightType, unit), rightType));
-                case GREATER_THAN -> new ComparisonExpression(GREATER_THAN, argument, toExpression(calculateRangeEndInclusive(rangeLow, rightType, unit), rightType));
+                case LESS_THAN_OR_EQUAL -> {
+                    yield new ComparisonExpression(LESS_THAN_OR_EQUAL, argument, new Constant(rightType, calculateRangeEndInclusive(rangeLow, rightType, unit)));
+                }
+                case GREATER_THAN -> {
+                    yield new ComparisonExpression(GREATER_THAN, argument, new Constant(rightType, calculateRangeEndInclusive(rangeLow, rightType, unit)));
+                }
                 case GREATER_THAN_OR_EQUAL -> {
                     if (rightValueAtRangeLow) {
-                        yield new ComparisonExpression(GREATER_THAN_OR_EQUAL, argument, toExpression(rangeLow, rightType));
+                        yield new ComparisonExpression(GREATER_THAN_OR_EQUAL, argument, new Constant(rightType, rangeLow));
                     }
-                    yield new ComparisonExpression(GREATER_THAN, argument, toExpression(calculateRangeEndInclusive(rangeLow, rightType, unit), rightType));
+                    yield new ComparisonExpression(GREATER_THAN, argument, new Constant(rightType, calculateRangeEndInclusive(rangeLow, rightType, unit)));
                 }
             };
         }
@@ -293,13 +277,8 @@ public class UnwrapDateTruncInComparison
         {
             return new BetweenPredicate(
                     argument,
-                    toExpression(minInclusive, type),
-                    toExpression(maxInclusive, type));
-        }
-
-        private Expression toExpression(Object value, Type type)
-        {
-            return literalEncoder.toExpression(value, type);
+                    new Constant(type, minInclusive),
+                    new Constant(type, maxInclusive));
         }
 
         private int compare(Type type, Object first, Object second)

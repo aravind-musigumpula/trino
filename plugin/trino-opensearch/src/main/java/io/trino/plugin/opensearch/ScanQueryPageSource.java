@@ -27,6 +27,7 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.opensearch.action.search.SearchResponse;
+import org.opensearch.common.document.DocumentField;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 
@@ -86,6 +87,14 @@ public class ScanQueryPageSource
                 .filter(entry -> entry.getValue().equals(TIMESTAMP_MILLIS))
                 .map(Map.Entry::getKey)
                 .collect(toImmutableList());
+        System.out.println("documentFields: " + documentFields);
+        System.out.println("TIMESTAMP_MILLIS: " + TIMESTAMP_MILLIS);
+
+        documentFields = columns.stream()
+                .map(OpenSearchColumnHandle::getName)
+                .filter(name -> !isBuiltinColumn(name))
+                .collect(toList());
+        System.out.println("documentFields: " + documentFields);
 
         columnBuilders = columns.stream()
                 .map(OpenSearchColumnHandle::getType)
@@ -96,6 +105,8 @@ public class ScanQueryPageSource
                 .map(OpenSearchColumnHandle::getName)
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
+
+        System.out.println("requiredFields: " + requiredFields);
 
         // sorting by _doc (index order) get special treatment in OpenSearch and is more efficient
         Optional<String> sort = Optional.of("_doc");
@@ -155,7 +166,8 @@ public class ScanQueryPageSource
         long size = 0;
         while (size < PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES && iterator.hasNext()) {
             SearchHit hit = iterator.next();
-            Map<String, Object> document = hit.getSourceAsMap();
+            //Map<String, Object> document = hit.getSourceAsMap();
+            Map<String, DocumentField> document = hit.getFields();
 
             for (int i = 0; i < decoders.size(); i++) {
                 String field = columns.get(i).getName();
@@ -180,13 +192,13 @@ public class ScanQueryPageSource
         return new Page(blocks);
     }
 
-    public static Object getField(Map<String, Object> document, String field)
+    public static Object getField(Map<String, DocumentField> document, String field)
     {
-        Object value = document.get(field);
+        Object value = document.get(field).getValue();
         if (value == null) {
             Map<String, Object> result = new HashMap<>();
             String prefix = field + ".";
-            for (Map.Entry<String, Object> entry : document.entrySet()) {
+            for (Map.Entry<String, DocumentField> entry : document.entrySet()) {
                 String key = entry.getKey();
                 if (key.startsWith(prefix)) {
                     result.put(key.substring(prefix.length()), entry.getValue());

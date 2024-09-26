@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>440-SNAPSHOT</version>
+        <version>443</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -117,6 +117,11 @@
         <dependency>
             <groupId>io.trino</groupId>
             <artifactId>trino-hive</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-hive-formats</artifactId>
         </dependency>
 
         <dependency>
@@ -353,6 +358,12 @@
 
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-parser</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-spi</artifactId>
             <type>test-jar</type>
             <scope>test</scope>
@@ -439,7 +450,6 @@
         <dependency>
             <groupId>org.rnorth.duct-tape</groupId>
             <artifactId>duct-tape</artifactId>
-            <version>${dep.duct-tape.version}</version>
             <scope>test</scope>
         </dependency>
 

@@ -19,8 +19,9 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
-import io.trino.sql.planner.IrTypeAnalyzer;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
@@ -28,9 +29,6 @@ import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.List;
 import java.util.Map;
@@ -39,6 +37,11 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.matching.Capture.newCapture;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.IrUtils.combineConjuncts;
 import static io.trino.sql.ir.IrUtils.extractConjuncts;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
@@ -49,11 +52,6 @@ import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.Patterns.filter;
 import static io.trino.sql.planner.plan.Patterns.join;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.partitioningBy;
 
@@ -89,15 +87,6 @@ public class PushInequalityFilterExpressionBelowJoinRuleSet
     private static final Capture<JoinNode> JOIN_CAPTURE = newCapture();
     private static final Pattern<FilterNode> FILTER_PATTERN = filter().with(source().matching(
             join().capturedAs(JOIN_CAPTURE)));
-
-    private final Metadata metadata;
-    private final IrTypeAnalyzer typeAnalyzer;
-
-    public PushInequalityFilterExpressionBelowJoinRuleSet(Metadata metadata, IrTypeAnalyzer typeAnalyzer)
-    {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-    }
 
     public Iterable<Rule<?>> rules()
     {
@@ -171,7 +160,7 @@ public class PushInequalityFilterExpressionBelowJoinRuleSet
 
     private Optional<Expression> conjunctsToFilter(List<Expression> conjuncts)
     {
-        return Optional.of(combineConjuncts(metadata, conjuncts)).filter(expression -> !TRUE_LITERAL.equals(expression));
+        return Optional.of(combineConjuncts(conjuncts)).filter(expression -> !TRUE_LITERAL.equals(expression));
     }
 
     Map<Boolean, List<Expression>> extractPushDownCandidates(JoinNodeContext joinNodeContext, Expression filter)
@@ -182,7 +171,7 @@ public class PushInequalityFilterExpressionBelowJoinRuleSet
 
     private boolean isSupportedExpression(JoinNodeContext joinNodeContext, Expression expression)
     {
-        if (!(expression instanceof ComparisonExpression comparison && isDeterministic(expression, metadata))) {
+        if (!(expression instanceof ComparisonExpression comparison && isDeterministic(expression))) {
             return false;
         }
         if (!SUPPORTED_COMPARISONS.contains(comparison.getOperator())) {
@@ -293,7 +282,7 @@ public class PushInequalityFilterExpressionBelowJoinRuleSet
     private Symbol symbolForExpression(Context context, Expression expression)
     {
         checkArgument(!(expression instanceof SymbolReference), "expression '%s' is a SymbolReference", expression);
-        return context.getSymbolAllocator().newSymbol(expression, typeAnalyzer.getType(context.getSession(), context.getSymbolAllocator().getTypes(), expression));
+        return context.getSymbolAllocator().newSymbol(expression, expression.type());
     }
 
     private class PushFilterExpressionBelowJoinFilterRule

@@ -162,7 +162,9 @@ public abstract class BaseJdbcConnectorTest
         try (TestTable testTable = createTableWithUnsupportedColumn()) {
             String unqualifiedTableName = testTable.getName().replaceAll("^\\w+\\.", "");
             // Check that column 'two' is not supported.
-            assertQuery("SELECT column_name FROM information_schema.columns WHERE table_name = '" + unqualifiedTableName + "'", "VALUES 'one', 'three'");
+            assertQuery(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = '" + getSession().getSchema().orElseThrow() + "' AND table_name = '" + unqualifiedTableName + "'",
+                    "VALUES 'one', 'three'");
             assertUpdate("INSERT INTO " + testTable.getName() + " (one, three) VALUES (123, 'test')", 1);
             assertQuery("SELECT one, three FROM " + testTable.getName(), "SELECT 123, 'test'");
         }
@@ -1586,7 +1588,7 @@ public abstract class BaseJdbcConnectorTest
 
         skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_UPDATE));
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_update_all", "(a INT, b INT, c INT)", ImmutableList.of("1, 2, 3"))) {
-            assertQueryFails("UPDATE " + table.getName() + " SET a = 1, b = 1, c = 2", MODIFYING_ROWS_MESSAGE);
+            assertUpdate("UPDATE " + table.getName() + " SET a = 1, b = 1, c = 2", 1);
         }
     }
 

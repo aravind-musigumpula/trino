@@ -13,39 +13,33 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
-import com.google.common.collect.ImmutableMap;
-import io.trino.metadata.Metadata;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.Type;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.ComparisonExpression.Operator;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.ExpressionRewriter;
-import io.trino.sql.tree.ExpressionTreeRewriter;
-import io.trino.sql.tree.LogicalExpression;
-import io.trino.sql.tree.NodeRef;
-import io.trino.sql.tree.NotExpression;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.ComparisonExpression.Operator;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.ExpressionRewriter;
+import io.trino.sql.ir.ExpressionTreeRewriter;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.NotExpression;
 
 import java.util.List;
-import java.util.Map;
 
-import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.IS_DISTINCT_FROM;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.IrUtils.combinePredicates;
 import static io.trino.sql.ir.IrUtils.extractPredicates;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.IS_DISTINCT_FROM;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
-import static java.util.Objects.requireNonNull;
 
 public final class PushDownNegationsExpressionRewriter
 {
-    public static Expression pushDownNegations(Metadata metadata, Expression expression, Map<NodeRef<Expression>, Type> expressionTypes)
+    public static Expression pushDownNegations(Expression expression)
     {
-        return ExpressionTreeRewriter.rewriteWith(new Visitor(metadata, expressionTypes), expression);
+        return ExpressionTreeRewriter.rewriteWith(new Visitor(), expression);
     }
 
     private PushDownNegationsExpressionRewriter() {}
@@ -53,30 +47,20 @@ public final class PushDownNegationsExpressionRewriter
     private static class Visitor
             extends ExpressionRewriter<Void>
     {
-        private final Metadata metadata;
-        private final Map<NodeRef<Expression>, Type> expressionTypes;
-
-        public Visitor(Metadata metadata, Map<NodeRef<Expression>, Type> expressionTypes)
-        {
-            this.metadata = requireNonNull(metadata, "metadata is null");
-            this.expressionTypes = ImmutableMap.copyOf(requireNonNull(expressionTypes, "expressionTypes is null"));
-        }
-
         @Override
         public Expression rewriteNotExpression(NotExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
         {
             if (node.getValue() instanceof LogicalExpression child) {
                 List<Expression> predicates = extractPredicates(child);
                 List<Expression> negatedPredicates = predicates.stream().map(predicate -> treeRewriter.rewrite((Expression) new NotExpression(predicate), context)).collect(toImmutableList());
-                return combinePredicates(metadata, child.getOperator().flip(), negatedPredicates);
+                return combinePredicates(child.getOperator().flip(), negatedPredicates);
             }
             if (node.getValue() instanceof ComparisonExpression child && child.getOperator() != IS_DISTINCT_FROM) {
                 Operator operator = child.getOperator();
                 Expression left = child.getLeft();
                 Expression right = child.getRight();
-                Type leftType = expressionTypes.get(NodeRef.of(left));
-                Type rightType = expressionTypes.get(NodeRef.of(right));
-                checkState(leftType != null && rightType != null, "missing type for expression");
+                Type leftType = left.type();
+                Type rightType = right.type();
                 if ((typeHasNaN(leftType) || typeHasNaN(rightType)) && (
                         operator == GREATER_THAN_OR_EQUAL ||
                                 operator == GREATER_THAN ||

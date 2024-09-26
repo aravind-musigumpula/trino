@@ -15,40 +15,56 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.IsNullPredicate;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.RowNumberSymbolMatcher;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.UnnestNode;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.StringLiteral;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
+import static io.trino.sql.ir.IrExpressions.ifExpression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.UnnestMapping.unnestMapping;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.assignUniqueId;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.functionCall;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.rowNumber;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.specification;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.unnest;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.window;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.windowFunction;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.JoinType.LEFT;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestDecorrelateUnnest
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction FAIL = FUNCTIONS.resolveFunction("fail", fromTypes(INTEGER, VARCHAR));
+
     @Test
     public void doesNotFireWithoutUnnest()
     {
@@ -90,7 +106,6 @@ public class TestDecorrelateUnnest
                                 ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                 Optional.empty(),
                                 LEFT,
-                                Optional.empty(),
                                 p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))))
                 .matches(
                         project(
@@ -99,7 +114,6 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                         Optional.of("ordinality"),
                                         LEFT,
-                                        Optional.empty(),
                                         assignUniqueId("unique", values("corr")))));
     }
 
@@ -117,7 +131,6 @@ public class TestDecorrelateUnnest
                                 ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                 Optional.empty(),
                                 LEFT,
-                                Optional.empty(),
                                 p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))))
                 .matches(
                         project(
@@ -126,7 +139,6 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                         Optional.of("ordinality"),
                                         LEFT,
-                                        Optional.empty(),
                                         assignUniqueId("unique", values("corr")))));
     }
 
@@ -144,7 +156,6 @@ public class TestDecorrelateUnnest
                                 ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                 Optional.empty(),
                                 INNER,
-                                Optional.empty(),
                                 p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))))
                 .matches(
                         project(
@@ -153,7 +164,6 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                         Optional.of("ordinality"),
                                         INNER,
-                                        Optional.empty(),
                                         assignUniqueId("unique", values("corr")))));
     }
 
@@ -171,17 +181,17 @@ public class TestDecorrelateUnnest
                                 ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                 Optional.empty(),
                                 INNER,
-                                Optional.empty(),
                                 p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))))
                 .matches(
                         project(
-                                ImmutableMap.of("corr", expression("corr"), "unnested_corr", expression("IF((ordinality IS NULL), CAST(null AS bigint), unnested_corr)")),
+                                ImmutableMap.of(
+                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                        "unnested_corr", expression(ifExpression(new IsNullPredicate(new SymbolReference(BIGINT, "ordinality")), new Constant(BIGINT, null), new SymbolReference(BIGINT, "unnested_corr")))),
                                 unnest(
                                         ImmutableList.of("corr", "unique"),
                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                         Optional.of("ordinality"),
                                         LEFT,
-                                        Optional.empty(),
                                         assignUniqueId("unique", values("corr")))));
     }
 
@@ -200,13 +210,14 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         INNER,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(// restore semantics of INNER unnest after it was rewritten to LEFT
-                                ImmutableMap.of("corr", expression("corr"), "unnested_corr", expression("IF((ordinality IS NULL), CAST(null AS bigint), unnested_corr)")),
+                                ImmutableMap.of(
+                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                        "unnested_corr", expression(ifExpression(new IsNullPredicate(new SymbolReference(BIGINT, "ordinality")), new Constant(BIGINT, null), new SymbolReference(BIGINT, "unnested_corr")))),
                                 filter(
-                                        "IF((row_number > BIGINT '1'), CAST(fail(INTEGER '28', VARCHAR 'Scalar sub-query has returned multiple rows') AS boolean), true)",
+                                        ifExpression(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 1L)), new Cast(new FunctionCall(FAIL, ImmutableList.of(new Constant(INTEGER, 28L), new Constant(VARCHAR, Slices.utf8Slice("Scalar sub-query has returned multiple rows")))), BOOLEAN), TRUE_LITERAL),
                                         rowNumber(
                                                 builder -> builder
                                                         .partitionBy(ImmutableList.of("unique"))
@@ -216,7 +227,6 @@ public class TestDecorrelateUnnest
                                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                         Optional.of("ordinality"),
                                                         LEFT,
-                                                        Optional.empty(),
                                                         assignUniqueId("unique", values("corr"))))
                                                 .withAlias("row_number", new RowNumberSymbolMatcher()))));
     }
@@ -237,12 +247,11 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         LEFT,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(
                                 filter(
-                                        "row_number <= BIGINT '5'",
+                                        new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)),
                                         rowNumber(
                                                 builder -> builder
                                                         .partitionBy(ImmutableList.of("unique"))
@@ -252,7 +261,6 @@ public class TestDecorrelateUnnest
                                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                         Optional.of("ordinality"),
                                                         LEFT,
-                                                        Optional.empty(),
                                                         assignUniqueId("unique", values("corr"))))
                                                 .withAlias("row_number", new RowNumberSymbolMatcher()))));
     }
@@ -274,24 +282,22 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         LEFT,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(
                                 filter(
-                                        "rank_number <= BIGINT '5'",
+                                        new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "rank_number"), new Constant(BIGINT, 5L)),
                                         window(builder -> builder
                                                         .specification(specification(
                                                                 ImmutableList.of("unique"),
                                                                 ImmutableList.of("unnested_corr"),
                                                                 ImmutableMap.of("unnested_corr", ASC_NULLS_FIRST)))
-                                                        .addFunction("rank_number", functionCall("rank", ImmutableList.of())),
+                                                        .addFunction("rank_number", windowFunction("rank", ImmutableList.of(), DEFAULT_FRAME)),
                                                 unnest(
                                                         ImmutableList.of("corr", "unique"),
                                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                         Optional.of("ordinality"),
                                                         LEFT,
-                                                        Optional.empty(),
                                                         assignUniqueId("unique", values("corr")))))));
     }
 
@@ -312,24 +318,22 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         LEFT,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(
                                 filter(
-                                        "row_number <= BIGINT '5'",
+                                        new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)),
                                         window(builder -> builder
                                                         .specification(specification(
                                                                 ImmutableList.of("unique"),
                                                                 ImmutableList.of("unnested_corr"),
                                                                 ImmutableMap.of("unnested_corr", ASC_NULLS_FIRST)))
-                                                        .addFunction("row_number", functionCall("row_number", ImmutableList.of())),
+                                                        .addFunction("row_number", windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
                                                 unnest(
                                                         ImmutableList.of("corr", "unique"),
                                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                         Optional.of("ordinality"),
                                                         LEFT,
-                                                        Optional.empty(),
                                                         assignUniqueId("unique", values("corr")))))));
     }
 
@@ -343,24 +347,26 @@ public class TestDecorrelateUnnest
                         JoinType.LEFT,
                         TRUE_LITERAL,
                         p.project(
-                                Assignments.of(p.symbol("boolean_result"), PlanBuilder.expression("unnested_corr IS NULL")),
+                                Assignments.of(p.symbol("boolean_result"), new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr"))),
                                 p.unnest(
                                         ImmutableList.of(),
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         LEFT,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(
                                 project(
-                                        ImmutableMap.of("corr", expression("corr"), "unique", expression("unique"), "ordinality", expression("ordinality"), "boolean_result", expression("unnested_corr IS NULL")),
+                                        ImmutableMap.of(
+                                                "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                                "unique", expression(new SymbolReference(BIGINT, "unique")),
+                                                "ordinality", expression(new SymbolReference(BIGINT, "ordinality")),
+                                                "boolean_result", expression(new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr")))),
                                         unnest(
                                                 ImmutableList.of("corr", "unique"),
                                                 ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                 Optional.of("ordinality"),
                                                 LEFT,
-                                                Optional.empty(),
                                                 assignUniqueId("unique", values("corr"))))));
 
         tester().assertThat(new DecorrelateUnnest(tester().getMetadata()))
@@ -370,25 +376,29 @@ public class TestDecorrelateUnnest
                         JoinType.LEFT,
                         TRUE_LITERAL,
                         p.project(
-                                Assignments.of(p.symbol("boolean_result"), PlanBuilder.expression("unnested_corr IS NULL")),
+                                Assignments.of(p.symbol("boolean_result"), new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr"))),
                                 p.unnest(
                                         ImmutableList.of(),
                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                         Optional.empty(),
                                         INNER,
-                                        Optional.empty(),
                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))
                 .matches(
                         project(// restore semantics of INNER unnest after it was rewritten to LEFT
-                                ImmutableMap.of("corr", expression("corr"), "boolean_result", expression("IF((ordinality IS NULL), CAST(null AS bigint), boolean_result)")),
+                                ImmutableMap.of(
+                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                        "boolean_result", expression(ifExpression(new IsNullPredicate(new SymbolReference(BIGINT, "ordinality")), new Constant(BIGINT, null), new SymbolReference(BOOLEAN, "boolean_result")))),
                                 project(// append projection from the subquery
-                                        ImmutableMap.of("corr", expression("corr"), "unique", expression("unique"), "ordinality", expression("ordinality"), "boolean_result", expression("unnested_corr IS NULL")),
+                                        ImmutableMap.of(
+                                                "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                                "unique", expression(new SymbolReference(BIGINT, "unique")),
+                                                "ordinality", expression(new SymbolReference(BIGINT, "ordinality")),
+                                                "boolean_result", expression(new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr")))),
                                         unnest(
                                                 ImmutableList.of("corr", "unique"),
                                                 ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                 Optional.of("ordinality"),
                                                 LEFT,
-                                                Optional.empty(),
                                                 assignUniqueId("unique", values("corr"))))));
     }
 
@@ -403,11 +413,11 @@ public class TestDecorrelateUnnest
                         TRUE_LITERAL,
                         p.enforceSingleRow(
                                 p.project(
-                                        Assignments.of(p.symbol("integer_result"), PlanBuilder.expression("IF(boolean_result, 1, -1)")),
+                                        Assignments.of(p.symbol("integer_result"), ifExpression(new SymbolReference(BOOLEAN, "boolean_result"), new Constant(INTEGER, 1L), new Constant(INTEGER, 1L))),
                                         p.limit(
                                                 5,
                                                 p.project(
-                                                        Assignments.of(p.symbol("boolean_result"), PlanBuilder.expression("unnested_corr IS NULL")),
+                                                        Assignments.of(p.symbol("boolean_result"), new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr"))),
                                                         p.topN(
                                                                 10,
                                                                 ImmutableList.of(p.symbol("unnested_corr")),
@@ -416,32 +426,40 @@ public class TestDecorrelateUnnest
                                                                         ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                                                         Optional.empty(),
                                                                         LEFT,
-                                                                        Optional.empty(),
                                                                         p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of()))))))))))
                 .matches(
                         project(
                                 filter(// enforce single row
-                                        "IF((row_number > BIGINT '1'), CAST(fail(INTEGER '28', VARCHAR 'Scalar sub-query has returned multiple rows') AS boolean), true)",
+                                        ifExpression(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 1L)), new Cast(new FunctionCall(FAIL, ImmutableList.of(new Constant(INTEGER, 28L), new Constant(VARCHAR, Slices.utf8Slice("Scalar sub-query has returned multiple rows")))), BOOLEAN), TRUE_LITERAL),
                                         project(// second projection
-                                                ImmutableMap.of("corr", expression("corr"), "unique", expression("unique"), "ordinality", expression("ordinality"), "row_number", expression("row_number"), "integer_result", expression("IF(boolean_result, 1, -1)")),
+                                                ImmutableMap.of(
+                                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                                        "unique", expression(new SymbolReference(BIGINT, "unique")),
+                                                        "ordinality", expression(new SymbolReference(BIGINT, "ordinality")),
+                                                        "row_number", expression(new SymbolReference(BIGINT, "row_number")),
+                                                        "integer_result", expression(ifExpression(new SymbolReference(BOOLEAN, "boolean_result"), new Constant(INTEGER, 1L), new Constant(INTEGER, 1L)))),
                                                 filter(// limit
-                                                        "row_number <= BIGINT '5'",
+                                                        new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 5L)),
                                                         project(// first projection
-                                                                ImmutableMap.of("corr", expression("corr"), "unique", expression("unique"), "ordinality", expression("ordinality"), "row_number", expression("row_number"), "boolean_result", expression("unnested_corr IS NULL")),
+                                                                ImmutableMap.of(
+                                                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                                                        "unique", expression(new SymbolReference(BIGINT, "unique")),
+                                                                        "ordinality", expression(new SymbolReference(BIGINT, "ordinality")),
+                                                                        "row_number", expression(new SymbolReference(BIGINT, "row_number")),
+                                                                        "boolean_result", expression(new IsNullPredicate(new SymbolReference(BIGINT, "unnested_corr")))),
                                                                 filter(// topN
-                                                                        "row_number <= BIGINT '10'",
+                                                                        new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "row_number"), new Constant(BIGINT, 10L)),
                                                                         window(builder -> builder
                                                                                         .specification(specification(
                                                                                                 ImmutableList.of("unique"),
                                                                                                 ImmutableList.of("unnested_corr"),
                                                                                                 ImmutableMap.of("unnested_corr", ASC_NULLS_FIRST)))
-                                                                                        .addFunction("row_number", functionCall("row_number", ImmutableList.of())),
+                                                                                        .addFunction("row_number", windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
                                                                                 unnest(
                                                                                         ImmutableList.of("corr", "unique"),
                                                                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                                                                         Optional.of("ordinality"),
                                                                                         LEFT,
-                                                                                        Optional.empty(),
                                                                                         assignUniqueId("unique", values("corr")))))))))));
     }
 
@@ -459,17 +477,17 @@ public class TestDecorrelateUnnest
                                 ImmutableList.of(new UnnestNode.Mapping(p.symbol("corr"), ImmutableList.of(p.symbol("unnested_corr")))),
                                 Optional.of(p.symbol("ordinality")),
                                 INNER,
-                                Optional.empty(),
                                 p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))))
                 .matches(
                         project(
-                                ImmutableMap.of("corr", expression("corr"), "unnested_corr", expression("IF((ordinality IS NULL), CAST(null AS bigint), unnested_corr)")),
+                                ImmutableMap.of(
+                                        "corr", expression(new SymbolReference(BIGINT, "corr")),
+                                        "unnested_corr", expression(ifExpression(new IsNullPredicate(new SymbolReference(BIGINT, "ordinality")), new Constant(BIGINT, null), new SymbolReference(BIGINT, "unnested_corr")))),
                                 unnest(
                                         ImmutableList.of("corr", "unique"),
                                         ImmutableList.of(unnestMapping("corr", ImmutableList.of("unnested_corr"))),
                                         Optional.of("ordinality"),
                                         LEFT,
-                                        Optional.empty(),
                                         assignUniqueId("unique", values("corr")))));
     }
 
@@ -480,8 +498,8 @@ public class TestDecorrelateUnnest
                 .on(p -> {
                     Symbol corr = p.symbol("corr", VARCHAR);
                     FunctionCall regexpExtractAll = new FunctionCall(
-                            tester().getMetadata().resolveBuiltinFunction("regexp_extract_all", fromTypes(VARCHAR, VARCHAR)).toQualifiedName(),
-                            ImmutableList.of(corr.toSymbolReference(), new StringLiteral(".")));
+                            tester().getMetadata().resolveBuiltinFunction("regexp_extract_all", fromTypes(VARCHAR, VARCHAR)),
+                            ImmutableList.of(corr.toSymbolReference(), new Constant(VARCHAR, Slices.utf8Slice("."))));
 
                     return p.correlatedJoin(
                             ImmutableList.of(corr),
@@ -493,7 +511,6 @@ public class TestDecorrelateUnnest
                                     ImmutableList.of(new UnnestNode.Mapping(p.symbol("char_array"), ImmutableList.of(p.symbol("unnested_char")))),
                                     Optional.empty(),
                                     LEFT,
-                                    Optional.empty(),
                                     p.project(
                                             Assignments.of(p.symbol("char_array"), regexpExtractAll),
                                             p.values(ImmutableList.of(), ImmutableList.of(ImmutableList.of())))));
@@ -505,9 +522,8 @@ public class TestDecorrelateUnnest
                                         ImmutableList.of(unnestMapping("char_array", ImmutableList.of("unnested_char"))),
                                         Optional.of("ordinality"),
                                         LEFT,
-                                        Optional.empty(),
                                         project(
-                                                ImmutableMap.of("char_array", expression("regexp_extract_all(corr, '.')")),
+                                                ImmutableMap.of("char_array", expression(new FunctionCall(tester().getMetadata().resolveBuiltinFunction("regexp_extract_all", fromTypes(VARCHAR, VARCHAR)), ImmutableList.of(new SymbolReference(BIGINT, "corr"), new Constant(VARCHAR, Slices.utf8Slice(".")))))),
                                                 assignUniqueId("unique", values("corr"))))));
     }
 }

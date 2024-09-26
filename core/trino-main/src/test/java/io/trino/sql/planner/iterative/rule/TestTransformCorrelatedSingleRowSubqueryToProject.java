@@ -15,24 +15,40 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.plugin.tpch.TpchColumnHandle;
+import io.trino.spi.function.OperatorType;
+import io.trino.spi.type.VarcharType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Row;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.Assignments;
-import io.trino.sql.tree.NullLiteral;
 import org.junit.jupiter.api.Test;
 
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.RowType.field;
+import static io.trino.spi.type.RowType.rowType;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.ADD;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
 
 public class TestTransformCorrelatedSingleRowSubqueryToProject
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction ADD_INTEGER = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(INTEGER, INTEGER));
+
     @Test
     public void testDoesNotFire()
     {
@@ -54,15 +70,15 @@ public class TestTransformCorrelatedSingleRowSubqueryToProject
                                         ImmutableMap.of(p.symbol("l_nationkey"), new TpchColumnHandle("nationkey",
                                                 BIGINT))),
                                 p.project(
-                                        Assignments.of(p.symbol("l_expr2"), expression("l_nationkey + 1")),
+                                        Assignments.of(p.symbol("l_expr2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "l_nationkey"), new Constant(INTEGER, 1L))),
                                         p.values(
                                                 ImmutableList.of(),
                                                 ImmutableList.of(
                                                         ImmutableList.of())))))
                 .matches(project(
                         ImmutableMap.of(
-                                "l_expr2", PlanMatchPattern.expression("l_nationkey + 1"),
-                                "l_nationkey", PlanMatchPattern.expression("l_nationkey")),
+                                "l_expr2", PlanMatchPattern.expression(new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "l_nationkey"), new Constant(INTEGER, 1L))),
+                                "l_nationkey", PlanMatchPattern.expression(new SymbolReference(BIGINT, "l_nationkey"))),
                         tableScan("nation", ImmutableMap.of("l_nationkey", "nationkey"))));
     }
 
@@ -87,36 +103,36 @@ public class TestTransformCorrelatedSingleRowSubqueryToProject
                     return p.correlatedJoin(
                             ImmutableList.of(a),
                             p.values(3, a),
-                            p.values(ImmutableList.of(a), ImmutableList.of(ImmutableList.of(expression("a")))));
+                            p.values(ImmutableList.of(a), ImmutableList.of(ImmutableList.of(new SymbolReference(BIGINT, "a")))));
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("a", PlanMatchPattern.expression("a")),
+                                ImmutableMap.of("a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a"))),
                                 values(ImmutableList.of("a"), ImmutableList.of(
-                                        ImmutableList.of(new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral())))));
+                                        ImmutableList.of(new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null))))));
 
         tester().assertThat(new TransformCorrelatedSingleRowSubqueryToProject())
                 .on(p -> {
-                    Symbol a = p.symbol("a");
-                    Symbol b = p.symbol("b");
-                    Symbol c = p.symbol("c");
+                    Symbol a = p.symbol("a", BIGINT);
+                    Symbol b = p.symbol("b", BIGINT);
+                    Symbol c = p.symbol("c", BIGINT);
                     return p.correlatedJoin(
                             ImmutableList.of(a),
                             p.values(3, a, b),
-                            p.values(ImmutableList.of(a, c), ImmutableList.of(ImmutableList.of(expression("a"), expression("1")))));
+                            p.values(ImmutableList.of(a, c), ImmutableList.of(ImmutableList.of(new SymbolReference(BIGINT, "a"), new Constant(BIGINT, 1L)))));
                 })
                 .matches(
                         project(
                                 ImmutableMap.of(
-                                        "a", PlanMatchPattern.expression("a"),
-                                        "b", PlanMatchPattern.expression("b"),
-                                        "c", PlanMatchPattern.expression("1")),
+                                        "a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a")),
+                                        "b", PlanMatchPattern.expression(new SymbolReference(BIGINT, "b")),
+                                        "c", PlanMatchPattern.expression(new Constant(BIGINT, 1L))),
                                 values(ImmutableList.of("a", "b"), ImmutableList.of(
-                                        ImmutableList.of(new NullLiteral(), new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral(), new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral(), new NullLiteral())))));
+                                        ImmutableList.of(new Constant(BIGINT, null), new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null), new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null), new Constant(BIGINT, null))))));
     }
 
     @Test
@@ -124,8 +140,8 @@ public class TestTransformCorrelatedSingleRowSubqueryToProject
     {
         tester().assertThat(new TransformCorrelatedSingleRowSubqueryToProject())
                 .on(p -> {
-                    Symbol a = p.symbol("a");
-                    Symbol b = p.symbol("b");
+                    Symbol a = p.symbol("a", BIGINT);
+                    Symbol b = p.symbol("b", BIGINT);
                     return p.correlatedJoin(
                             ImmutableList.of(),
                             p.values(3, a),
@@ -134,12 +150,12 @@ public class TestTransformCorrelatedSingleRowSubqueryToProject
                 .matches(
                         project(
                                 ImmutableMap.of(
-                                        "a", PlanMatchPattern.expression("a"),
-                                        "b", PlanMatchPattern.expression("null")),
+                                        "a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a")),
+                                        "b", PlanMatchPattern.expression(new Constant(BIGINT, null))),
                                 values(ImmutableList.of("a"), ImmutableList.of(
-                                        ImmutableList.of(new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral()),
-                                        ImmutableList.of(new NullLiteral())))));
+                                        ImmutableList.of(new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null)),
+                                        ImmutableList.of(new Constant(BIGINT, null))))));
     }
 
     @Test
@@ -166,7 +182,7 @@ public class TestTransformCorrelatedSingleRowSubqueryToProject
                     return p.correlatedJoin(
                             ImmutableList.of(a),
                             p.values(3, a),
-                            p.valuesOfExpressions(ImmutableList.of(p.symbol("b")), ImmutableList.of(expression("CAST(ROW('true') AS ROW(col boolean))"))));
+                            p.valuesOfExpressions(ImmutableList.of(p.symbol("b")), ImmutableList.of(new Cast(new Row(ImmutableList.of(new Constant(VarcharType.VARCHAR, Slices.utf8Slice("true")))), rowType(field("col", BOOLEAN))))));
                 })
                 .doesNotFire();
     }

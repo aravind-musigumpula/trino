@@ -16,7 +16,14 @@ package io.trino.sql.query;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.spi.function.OperatorType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
@@ -30,10 +37,14 @@ import java.util.Optional;
 
 import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_SPLITS_PER_NODE;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
+import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.RowType.rowType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MULTIPLY;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.SUBTRACT;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregationFunction;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.any;
@@ -60,6 +71,10 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 @Execution(CONCURRENT)
 public class TestSubqueries
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction SUBTRACT_INTEGER = FUNCTIONS.resolveOperator(OperatorType.SUBTRACT, ImmutableList.of(INTEGER, INTEGER));
+    private static final ResolvedFunction MULTIPLY_INTEGER = FUNCTIONS.resolveOperator(OperatorType.MULTIPLY, ImmutableList.of(INTEGER, INTEGER));
+
     private static final String UNSUPPORTED_CORRELATED_SUBQUERY_ERROR_MSG = "line .*: Given correlated subquery is not supported";
 
     private final QueryAssertions assertions;
@@ -98,7 +113,7 @@ public class TestSubqueries
                                         anyTree(
                                                 values("y")),
                                         project(
-                                                ImmutableMap.of("NON_NULL", expression("true")),
+                                                ImmutableMap.of("NON_NULL", expression(TRUE_LITERAL)),
                                                 values("x"))))));
 
         assertions.assertQueryAndPlan(
@@ -112,7 +127,7 @@ public class TestSubqueries
                                         anyTree(
                                                 values("y")),
                                         project(
-                                                ImmutableMap.of("NON_NULL", expression("true")),
+                                                ImmutableMap.of("NON_NULL", expression(TRUE_LITERAL)),
                                                 values("x"))))));
     }
 
@@ -208,13 +223,13 @@ public class TestSubqueries
                                 .equiCriteria("cast_b", "cast_a")
                                 .left(
                                         project(
-                                                ImmutableMap.of("cast_b", expression("CAST(b AS decimal(11, 1))")),
+                                                ImmutableMap.of("cast_b", expression(new Cast(new SymbolReference(INTEGER, "b"), createDecimalType(11, 1)))),
                                                 any(
                                                         values("b"))))
                                 .right(
                                         anyTree(
                                                 project(
-                                                        ImmutableMap.of("cast_a", expression("CAST(a AS decimal(11, 1))")),
+                                                        ImmutableMap.of("cast_a", expression(new Cast(new SymbolReference(INTEGER, "a"), createDecimalType(11, 1)))),
                                                         any(
                                                                 rowNumber(
                                                                         rowBuilder -> rowBuilder
@@ -232,7 +247,7 @@ public class TestSubqueries
                                 .equiCriteria("expr", "a")
                                 .left(
                                         project(
-                                                ImmutableMap.of("expr", expression("b * c - 1")),
+                                                ImmutableMap.of("expr", expression(new ArithmeticBinaryExpression(SUBTRACT_INTEGER, SUBTRACT, new ArithmeticBinaryExpression(MULTIPLY_INTEGER, MULTIPLY, new SymbolReference(INTEGER, "b"), new SymbolReference(INTEGER, "c")), new Constant(INTEGER, 1L)))),
                                                 any(
                                                         values("b", "c"))))
                                 .right(
@@ -508,7 +523,7 @@ public class TestSubqueries
                                                 values("t2_b")),
                                         anyTree(
                                                 project(
-                                                        ImmutableMap.of("NON_NULL", expression("true")),
+                                                        ImmutableMap.of("NON_NULL", expression(TRUE_LITERAL)),
                                                         anyTree(
                                                                 aggregation(
                                                                         ImmutableMap.of(),
@@ -533,7 +548,7 @@ public class TestSubqueries
                                                 values("t2_b")),
                                         anyTree(
                                                 project(
-                                                        ImmutableMap.of("NON_NULL", expression("true")),
+                                                        ImmutableMap.of("NON_NULL", expression(TRUE_LITERAL)),
                                                         aggregation(
                                                                 ImmutableMap.of(),
                                                                 FINAL,

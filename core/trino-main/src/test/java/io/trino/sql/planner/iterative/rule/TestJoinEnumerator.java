@@ -23,6 +23,7 @@ import io.trino.cost.CachingTableStatsProvider;
 import io.trino.cost.CostComparator;
 import io.trino.cost.CostProvider;
 import io.trino.cost.PlanCostEstimate;
+import io.trino.cost.RuntimeInfoProvider;
 import io.trino.cost.StatsProvider;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.sql.planner.PlanNodeIdAllocator;
@@ -45,9 +46,9 @@ import java.util.LinkedHashSet;
 import java.util.Optional;
 
 import static io.airlift.testing.Closeables.closeAllRuntimeException;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.planner.iterative.Lookup.noLookup;
 import static io.trino.sql.planner.iterative.rule.ReorderJoins.JoinEnumerator.generatePartitions;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -103,7 +104,6 @@ public class TestJoinEnumerator
                 ImmutableList.of(a1, b1),
                 false);
         JoinEnumerator joinEnumerator = new JoinEnumerator(
-                planTester.getPlannerContext().getMetadata(),
                 new CostComparator(1, 1, 1),
                 multiJoinNode.getFilter(),
                 createContext());
@@ -121,14 +121,13 @@ public class TestJoinEnumerator
                 Optional.empty(),
                 noLookup(),
                 planTester.getDefaultSession(),
-                symbolAllocator.getTypes(),
-                new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), planTester.getDefaultSession()));
+                new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), planTester.getDefaultSession()),
+                RuntimeInfoProvider.noImplementation());
         CachingCostProvider costProvider = new CachingCostProvider(
                 planTester.getCostCalculator(),
                 statsProvider,
                 Optional.empty(),
-                planTester.getDefaultSession(),
-                symbolAllocator.getTypes());
+                planTester.getDefaultSession());
 
         return new Rule.Context()
         {

@@ -15,21 +15,26 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.FilterNode;
-import io.trino.sql.tree.ComparisonExpression;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.apply;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.setExpression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.type.UnknownType.UNKNOWN;
 
 public class TestPruneApplyColumns
         extends BaseRuleTest
@@ -55,7 +60,7 @@ public class TestPruneApplyColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("a", PlanMatchPattern.expression("a")),
+                                ImmutableMap.of("a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a"))),
                                 values("a", "correlationSymbol")));
     }
 
@@ -85,12 +90,12 @@ public class TestPruneApplyColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("a", PlanMatchPattern.expression("a"), "in_result_1", PlanMatchPattern.expression("in_result_1")),
+                                ImmutableMap.of("a", expression(new SymbolReference(BIGINT, "a")), "in_result_1", expression(new SymbolReference(BOOLEAN, "in_result_1"))),
                                 apply(
                                         ImmutableList.of("correlation_symbol"),
-                                        ImmutableMap.of("in_result_1", setExpression(new ApplyNode.In(new Symbol("a"), new Symbol("subquery_symbol")))),
+                                        ImmutableMap.of("in_result_1", setExpression(new ApplyNode.In(new Symbol(UNKNOWN, "a"), new Symbol(UNKNOWN, "subquery_symbol")))),
                                         project(
-                                                ImmutableMap.of("a", PlanMatchPattern.expression("a"), "correlation_symbol", PlanMatchPattern.expression("correlation_symbol")),
+                                                ImmutableMap.of("a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a")), "correlation_symbol", PlanMatchPattern.expression(new SymbolReference(BIGINT, "correlation_symbol"))),
                                                 values("a", "b", "correlation_symbol")),
                                         node(
                                                 FilterNode.class,
@@ -119,13 +124,13 @@ public class TestPruneApplyColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("a", PlanMatchPattern.expression("a"), "in_result_1", PlanMatchPattern.expression("in_result_1")),
+                                ImmutableMap.of("a", expression(new SymbolReference(BIGINT, "a")), "in_result_1", expression(new SymbolReference(BOOLEAN, "in_result_1"))),
                                 apply(
                                         ImmutableList.of("correlation_symbol"),
-                                        ImmutableMap.of("in_result_1", setExpression(new ApplyNode.In(new Symbol("a"), new Symbol("subquery_symbol_1")))),
+                                        ImmutableMap.of("in_result_1", setExpression(new ApplyNode.In(new Symbol(UNKNOWN, "a"), new Symbol(UNKNOWN, "subquery_symbol_1")))),
                                         values("a", "correlation_symbol"),
                                         project(
-                                                ImmutableMap.of("subquery_symbol_1", PlanMatchPattern.expression("subquery_symbol_1")),
+                                                ImmutableMap.of("subquery_symbol_1", expression(new SymbolReference(BIGINT, "subquery_symbol_1"))),
                                                 node(
                                                         FilterNode.class,
                                                         values("subquery_symbol_1", "subquery_symbol_2"))))));
@@ -153,13 +158,13 @@ public class TestPruneApplyColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("correlation_symbol", PlanMatchPattern.expression("correlation_symbol"), "in_result", PlanMatchPattern.expression("in_result")),
+                                ImmutableMap.of("correlation_symbol", PlanMatchPattern.expression(new SymbolReference(BIGINT, "correlation_symbol")), "in_result", PlanMatchPattern.expression(new SymbolReference(BOOLEAN, "in_result"))),
                                 apply(
                                         ImmutableList.of("correlation_symbol"),
-                                        ImmutableMap.of("in_result", setExpression(new ApplyNode.In(new Symbol("a"), new Symbol("subquery_symbol")))),
+                                        ImmutableMap.of("in_result", setExpression(new ApplyNode.In(new Symbol(UNKNOWN, "a"), new Symbol(UNKNOWN, "subquery_symbol")))),
                                         values("a", "correlation_symbol"),
                                         project(
-                                                ImmutableMap.of("subquery_symbol", PlanMatchPattern.expression("subquery_symbol")),
+                                                ImmutableMap.of("subquery_symbol", PlanMatchPattern.expression(new SymbolReference(BIGINT, "subquery_symbol"))),
                                                 node(
                                                         FilterNode.class,
                                                         values("unreferenced", "subquery_symbol"))))));
@@ -187,12 +192,12 @@ public class TestPruneApplyColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("correlation_symbol", PlanMatchPattern.expression("correlation_symbol"), "in_result", PlanMatchPattern.expression("in_result")),
+                                ImmutableMap.of("correlation_symbol", PlanMatchPattern.expression(new SymbolReference(BIGINT, "correlation_symbol")), "in_result", PlanMatchPattern.expression(new SymbolReference(BOOLEAN, "in_result"))),
                                 apply(
                                         ImmutableList.of("correlation_symbol"),
-                                        ImmutableMap.of("in_result", setExpression(new ApplyNode.In(new Symbol("a"), new Symbol("subquery_symbol")))),
+                                        ImmutableMap.of("in_result", setExpression(new ApplyNode.In(new Symbol(UNKNOWN, "a"), new Symbol(UNKNOWN, "subquery_symbol")))),
                                         project(
-                                                ImmutableMap.of("a", PlanMatchPattern.expression("a"), "correlation_symbol", PlanMatchPattern.expression("correlation_symbol")),
+                                                ImmutableMap.of("a", PlanMatchPattern.expression(new SymbolReference(BIGINT, "a")), "correlation_symbol", PlanMatchPattern.expression(new SymbolReference(BIGINT, "correlation_symbol"))),
                                                 values("a", "unreferenced", "correlation_symbol")),
                                         node(
                                                 FilterNode.class,

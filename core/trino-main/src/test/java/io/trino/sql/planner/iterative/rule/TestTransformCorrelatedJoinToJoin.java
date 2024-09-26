@@ -14,22 +14,27 @@
 package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.JoinType;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.LongLiteral;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.JoinType.LEFT;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN;
 
 public class TestTransformCorrelatedJoinToJoin
         extends BaseRuleTest
@@ -53,7 +58,7 @@ public class TestTransformCorrelatedJoinToJoin
                 })
                 .matches(
                         join(JoinType.INNER, builder -> builder
-                                .filter("b > a")
+                                .filter(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b"), new SymbolReference(BIGINT, "a")))
                                 .left(values("a"))
                                 .right(
                                         filter(
@@ -71,7 +76,7 @@ public class TestTransformCorrelatedJoinToJoin
                             new ComparisonExpression(
                                     LESS_THAN,
                                     b.toSymbolReference(),
-                                    new LongLiteral("3")),
+                                    new Constant(INTEGER, 3L)),
                             p.filter(
                                     new ComparisonExpression(
                                             GREATER_THAN,
@@ -81,7 +86,7 @@ public class TestTransformCorrelatedJoinToJoin
                 })
                 .matches(
                         join(JoinType.INNER, builder -> builder
-                                .filter("b > a AND b < 3")
+                                .filter(new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b"), new SymbolReference(BIGINT, "a")), new ComparisonExpression(LESS_THAN, new SymbolReference(INTEGER, "b"), new Constant(INTEGER, 3L)))))
                                 .left(values("a"))
                                 .right(
                                         filter(
@@ -110,7 +115,7 @@ public class TestTransformCorrelatedJoinToJoin
                 })
                 .matches(
                         join(JoinType.LEFT, builder -> builder
-                                .filter("b > a")
+                                .filter(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b"), new SymbolReference(BIGINT, "a")))
                                 .left(values("a"))
                                 .right(
                                         filter(
@@ -128,7 +133,7 @@ public class TestTransformCorrelatedJoinToJoin
                             new ComparisonExpression(
                                     LESS_THAN,
                                     b.toSymbolReference(),
-                                    new LongLiteral("3")),
+                                    new Constant(INTEGER, 3L)),
                             p.filter(
                                     new ComparisonExpression(
                                             GREATER_THAN,
@@ -138,7 +143,7 @@ public class TestTransformCorrelatedJoinToJoin
                 })
                 .matches(
                         join(JoinType.LEFT, builder -> builder
-                                .filter("b > a AND b < 3")
+                                .filter(new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b"), new SymbolReference(BIGINT, "a")), new ComparisonExpression(LESS_THAN, new SymbolReference(INTEGER, "b"), new Constant(INTEGER, 3L)))))
                                 .left(values("a"))
                                 .right(
                                         filter(
@@ -157,7 +162,7 @@ public class TestTransformCorrelatedJoinToJoin
                         TRUE_LITERAL,
                         p.enforceSingleRow(
                                 p.filter(
-                                        PlanBuilder.expression("corr = a"),
+                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "corr"), new SymbolReference(BIGINT, "a")),
                                         p.values(p.symbol("a"))))))
                 .doesNotFire();
     }

@@ -15,7 +15,19 @@ package io.trino.sql.planner;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
 import io.trino.Session;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.function.OperatorType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.InPredicate;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
@@ -29,6 +41,23 @@ import java.util.List;
 
 import static io.trino.SystemSessionProperties.ENABLE_DYNAMIC_FILTERING;
 import static io.trino.SystemSessionProperties.FILTERING_SEMI_JOIN_TO_INNER;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.ADD;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.DIVIDE;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MULTIPLY;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.SUBTRACT;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.NOT_EQUAL;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
+import static io.trino.sql.ir.LogicalExpression.Operator.OR;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.assignUniqueId;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -42,11 +71,20 @@ import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.JoinType.LEFT;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 
 public abstract class AbstractPredicatePushdownTest
         extends BasePlanTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction RANDOM = FUNCTIONS.resolveFunction("random", fromTypes());
+    private static final ResolvedFunction ROUND = FUNCTIONS.resolveFunction("round", fromTypes(DOUBLE));
+    private static final ResolvedFunction LENGTH = FUNCTIONS.resolveFunction("length", fromTypes(createVarcharType(1)));
+    private static final ResolvedFunction ADD_BIGINT = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(BIGINT, BIGINT));
+    private static final ResolvedFunction MULTIPLY_BIGINT = FUNCTIONS.resolveOperator(OperatorType.MULTIPLY, ImmutableList.of(BIGINT, BIGINT));
+    private static final ResolvedFunction DIVIDE_INTEGER = FUNCTIONS.resolveOperator(OperatorType.DIVIDE, ImmutableList.of(INTEGER, INTEGER));
+    private static final ResolvedFunction SUBTRACT_INTEGER = FUNCTIONS.resolveOperator(OperatorType.SUBTRACT, ImmutableList.of(INTEGER, INTEGER));
+    private static final ResolvedFunction MULTIPLY_DOUBLE = FUNCTIONS.resolveOperator(OperatorType.MULTIPLY, ImmutableList.of(DOUBLE, DOUBLE));
+
     private final boolean enableDynamicFiltering;
 
     protected AbstractPredicatePushdownTest(boolean enableDynamicFiltering)
@@ -67,7 +105,8 @@ public abstract class AbstractPredicatePushdownTest
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
                                 anyTree(
-                                        filter("LINE_NUMBER = 2",
+                                        filter(
+                                                new ComparisonExpression(EQUAL, new SymbolReference(INTEGER, "LINE_NUMBER"), new Constant(INTEGER, 2L)),
                                                 tableScan("lineitem", ImmutableMap.of(
                                                         "LINE_ORDER_KEY", "orderkey",
                                                         "LINE_NUMBER", "linenumber",
@@ -82,7 +121,8 @@ public abstract class AbstractPredicatePushdownTest
                 noSemiJoinRewrite(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
-                                filter("LINE_ORDER_KEY = CAST(random(5) AS bigint)",
+                                filter(
+                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Cast(new FunctionCall(RANDOM, ImmutableList.of(new Constant(INTEGER, 5L))), BIGINT)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey"))),
                                 node(ExchangeNode.class, // NO filter here
@@ -91,7 +131,8 @@ public abstract class AbstractPredicatePushdownTest
         assertPlan("SELECT * FROM lineitem WHERE orderkey NOT IN (SELECT orderkey FROM orders) AND orderkey = random(5)",
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT",
-                                filter("LINE_ORDER_KEY = CAST(random(5) AS bigint)",
+                                filter(
+                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Cast(new FunctionCall(RANDOM, ImmutableList.of(new Constant(INTEGER, 5L))), BIGINT)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey"))),
                                 anyTree(
@@ -105,12 +146,13 @@ public abstract class AbstractPredicatePushdownTest
                 noSemiJoinRewrite(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
-                                filter("LINE_ORDER_KEY > BIGINT '2'",
+                                filter(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey",
                                                 "LINE_QUANTITY", "quantity"))),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY > BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -121,12 +163,14 @@ public abstract class AbstractPredicatePushdownTest
                 noSemiJoinRewrite(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
-                                filter("LINE_ORDER_KEY = BIGINT '2'",
+                                filter(
+                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey",
                                                 "LINE_QUANTITY", "quantity"))),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY = BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -142,7 +186,8 @@ public abstract class AbstractPredicatePushdownTest
                                         "LINE_ORDER_KEY", "orderkey",
                                         "LINE_QUANTITY", "quantity")),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY > BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -153,12 +198,14 @@ public abstract class AbstractPredicatePushdownTest
                 noSemiJoinRewrite(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
-                                filter("LINE_ORDER_KEY > BIGINT '2'",
+                                filter(
+                                        new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey",
                                                 "LINE_QUANTITY", "quantity"))),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY > BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -169,12 +216,14 @@ public abstract class AbstractPredicatePushdownTest
                 noSemiJoinRewrite(),
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT", enableDynamicFiltering,
-                                filter("LINE_ORDER_KEY = BIGINT '2'",
+                                filter(
+                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey",
                                                 "LINE_QUANTITY", "quantity"))),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY = BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -184,7 +233,8 @@ public abstract class AbstractPredicatePushdownTest
         assertPlan("SELECT quantity FROM (SELECT * FROM lineitem WHERE orderkey NOT IN (SELECT orderkey FROM orders) AND orderkey > 2)",
                 anyTree(
                         semiJoin("LINE_ORDER_KEY", "ORDERS_ORDER_KEY", "SEMI_JOIN_RESULT",
-                                filter("LINE_ORDER_KEY > BIGINT '2'",
+                                filter(
+                                        new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "LINE_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                         tableScan("lineitem", ImmutableMap.of(
                                                 "LINE_ORDER_KEY", "orderkey",
                                                 "LINE_QUANTITY", "quantity"))),
@@ -202,7 +252,8 @@ public abstract class AbstractPredicatePushdownTest
                                 tableScan("lineitem", ImmutableMap.of(
                                         "LINE_ORDER_KEY", "orderkey")),
                                 anyTree(
-                                        filter("ORDERS_ORDER_KEY > BIGINT '2'",
+                                        filter(
+                                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "ORDERS_ORDER_KEY"), new Constant(BIGINT, 2L)),
                                                 tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey")))))));
     }
 
@@ -243,9 +294,9 @@ public abstract class AbstractPredicatePushdownTest
                         join(LEFT, builder -> builder
                                 .equiCriteria("A", "B")
                                 .left(
-                                        assignUniqueId("unique", filter("A = 1", values("A"))))
+                                        assignUniqueId("unique", filter(new ComparisonExpression(EQUAL, new SymbolReference(INTEGER, "A"), new Constant(INTEGER, 1L)), values("A"))))
                                 .right(
-                                        filter("1 = B", values("B"))))));
+                                        filter(new ComparisonExpression(EQUAL, new Constant(INTEGER, 1L), new SymbolReference(INTEGER, "B")), values("B"))))));
     }
 
     @Test
@@ -256,8 +307,9 @@ public abstract class AbstractPredicatePushdownTest
                 "WITH t AS (SELECT orderkey * 2 x FROM orders) " +
                         "SELECT * FROM t WHERE x + x > 1",
                 anyTree(
-                        filter("((expr + expr) > BIGINT '1')",
-                                project(ImmutableMap.of("expr", expression("orderkey * BIGINT '2'")),
+                        filter(
+                                new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "expr"), new SymbolReference(BIGINT, "expr")), new Constant(BIGINT, 1L)),
+                                project(ImmutableMap.of("expr", expression(new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 2L)))),
                                         tableScan("orders", ImmutableMap.of("orderkey", "orderkey"))))));
 
         // constant non-singleton should be pushed down
@@ -266,7 +318,8 @@ public abstract class AbstractPredicatePushdownTest
                         "SELECT * FROM t WHERE x + y + y >1",
                 anyTree(
                         project(
-                                filter("(((orderkey * BIGINT '2') + BIGINT '1') + BIGINT '1') > BIGINT '1'",
+                                filter(
+                                        new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)), new Constant(BIGINT, 1L)), new Constant(BIGINT, 1L)),
                                         tableScan("orders", ImmutableMap.of(
                                                 "orderkey", "orderkey"))))));
 
@@ -276,7 +329,8 @@ public abstract class AbstractPredicatePushdownTest
                         "SELECT * FROM t WHERE x > 1",
                 anyTree(
                         project(
-                                filter("(orderkey * BIGINT '2') > BIGINT '1'",
+                                filter(
+                                        new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 1L)),
                                         tableScan("orders", ImmutableMap.of(
                                                 "orderkey", "orderkey"))))));
 
@@ -286,7 +340,8 @@ public abstract class AbstractPredicatePushdownTest
                         "SELECT * FROM t WHERE x + y > 1",
                 anyTree(
                         project(
-                                filter("((orderkey * BIGINT '2') + orderkey) > BIGINT '1'",
+                                filter(
+                                        new ComparisonExpression(GREATER_THAN, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new ArithmeticBinaryExpression(MULTIPLY_BIGINT, MULTIPLY, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 2L)), new SymbolReference(BIGINT, "orderkey")), new Constant(BIGINT, 1L)),
                                         tableScan("orders", ImmutableMap.of(
                                                 "orderkey", "orderkey"))))));
 
@@ -295,7 +350,8 @@ public abstract class AbstractPredicatePushdownTest
                 "WITH t AS (SELECT orderkey x FROM orders) " +
                         "SELECT * FROM t WHERE x >1",
                 anyTree(
-                        filter("orderkey > BIGINT '1'",
+                        filter(
+                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 1L)),
                                 tableScan("orders", ImmutableMap.of(
                                         "orderkey", "orderkey")))));
 
@@ -304,8 +360,9 @@ public abstract class AbstractPredicatePushdownTest
                 "WITH t AS (SELECT rand() * orderkey x FROM orders) " +
                         "SELECT * FROM t WHERE x > 5000",
                 anyTree(
-                        filter("expr > 5E3",
-                                project(ImmutableMap.of("expr", expression("random() * CAST(orderkey AS double)")),
+                        filter(
+                                new ComparisonExpression(GREATER_THAN, new SymbolReference(DOUBLE, "expr"), new Constant(DOUBLE, 5000.0)),
+                                project(ImmutableMap.of("expr", expression(new ArithmeticBinaryExpression(MULTIPLY_DOUBLE, MULTIPLY, new FunctionCall(RANDOM, ImmutableList.of()), new Cast(new SymbolReference(BIGINT, "orderkey"), DOUBLE)))),
                                         tableScan("orders", ImmutableMap.of(
                                                 "orderkey", "orderkey"))))));
     }
@@ -318,7 +375,8 @@ public abstract class AbstractPredicatePushdownTest
                 "WITH t AS (SELECT orderkey x, (orderkey + 1) x2 FROM orders) " +
                         "SELECT * FROM t WHERE x > 1 OR x < 0",
                 anyTree(
-                        filter("orderkey < BIGINT '0' OR orderkey > BIGINT '1'",
+                        filter(
+                                new LogicalExpression(OR, ImmutableList.of(new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 0L)), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "orderkey"), new Constant(BIGINT, 1L)))),
                                 tableScan("orders", ImmutableMap.of(
                                         "orderkey", "orderkey")))));
     }
@@ -339,7 +397,8 @@ public abstract class AbstractPredicatePushdownTest
                 anyTree(
                         // Order matters: size<>1 should be before 100/(size-1)=2.
                         // In this particular example, reversing the order leads to div-by-zero error.
-                        filter("size <> 1 AND 100/(size - 1) = 2",
+                        filter(
+                                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(NOT_EQUAL, new SymbolReference(INTEGER, "size"), new Constant(INTEGER, 1L)), new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(DIVIDE_INTEGER, DIVIDE, new Constant(INTEGER, 100L), new ArithmeticBinaryExpression(SUBTRACT_INTEGER, SUBTRACT, new SymbolReference(INTEGER, "size"), new Constant(INTEGER, 1L))), new Constant(INTEGER, 2L)))),
                                 tableScan("part", ImmutableMap.of(
                                         "partkey", "partkey",
                                         "size", "size")))));
@@ -359,11 +418,13 @@ public abstract class AbstractPredicatePushdownTest
                         "FROM orders" +
                         ") WHERE custkey = 0 AND orderkey > 0",
                 anyTree(
-                        filter("ORDER_KEY > BIGINT '0'",
+                        filter(
+                                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "ORDER_KEY"), new Constant(BIGINT, 0L)),
                                 anyTree(
                                         node(WindowNode.class,
                                                 anyTree(
-                                                        filter("CUST_KEY = BIGINT '0'",
+                                                        filter(
+                                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "CUST_KEY"), new Constant(BIGINT, 0L)),
                                                                 tableScan)))))));
     }
 
@@ -378,8 +439,9 @@ public abstract class AbstractPredicatePushdownTest
                 anyTree(
                         node(WindowNode.class,
                                 anyTree(
-                                        filter("\"ROUND\" > 1E2",
-                                                project(ImmutableMap.of("ROUND", expression("round(CAST(CUST_KEY AS double) * random())")),
+                                        filter(
+                                                new ComparisonExpression(GREATER_THAN, new SymbolReference(DOUBLE, "ROUND"), new Constant(DOUBLE, 100.0)),
+                                                project(ImmutableMap.of("ROUND", expression(new FunctionCall(ROUND, ImmutableList.of(new ArithmeticBinaryExpression(MULTIPLY_DOUBLE, MULTIPLY, new Cast(new SymbolReference(BIGINT, "CUST_KEY"), DOUBLE), new FunctionCall(RANDOM, ImmutableList.of())))))),
                                                         tableScan(
                                                                 "orders",
                                                                 ImmutableMap.of("CUST_KEY", "custkey"))))))));
@@ -394,7 +456,8 @@ public abstract class AbstractPredicatePushdownTest
                         "FROM orders" +
                         ") WHERE custkey > 100*rand()",
                 anyTree(
-                        filter("CAST(CUST_KEY AS double) > (random() * 1E2)",
+                        filter(
+                                new ComparisonExpression(GREATER_THAN, new Cast(new SymbolReference(BIGINT, "CUST_KEY"), DOUBLE), new ArithmeticBinaryExpression(MULTIPLY_DOUBLE, MULTIPLY, new FunctionCall(RANDOM, ImmutableList.of()), new Constant(DOUBLE, 100.0))),
                                 anyTree(
                                         node(WindowNode.class,
                                                 anyTree(
@@ -414,7 +477,8 @@ public abstract class AbstractPredicatePushdownTest
                         node(
                                 JoinNode.class,
                                 node(ProjectNode.class,
-                                        filter("(ORDERKEY = BIGINT '123') AND random() = CAST(ORDERKEY AS double) AND length(ORDERSTATUS) < BIGINT '42'",
+                                        filter(
+                                                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "ORDERKEY"), new Constant(BIGINT, 123L)), new ComparisonExpression(EQUAL, new FunctionCall(RANDOM, ImmutableList.of()), new Cast(new SymbolReference(BIGINT, "ORDERKEY"), DOUBLE)), new ComparisonExpression(LESS_THAN, new FunctionCall(LENGTH, ImmutableList.of(new SymbolReference(createVarcharType(1), "ORDERSTATUS"))), new Constant(BIGINT, 42L)))),
                                                 tableScan(
                                                         "orders",
                                                         ImmutableMap.of(
@@ -431,10 +495,12 @@ public abstract class AbstractPredicatePushdownTest
                 "SELECT * FROM orders, nation WHERE orderstatus = CAST(nation.name AS varchar(1)) AND orderstatus BETWEEN 'A' AND 'O'",
                 anyTree(
                         node(JoinNode.class,
-                                filter("ORDERSTATUS IN ('F', 'O')",
+                                filter(
+                                        new InPredicate(new SymbolReference(createVarcharType(1), "ORDERSTATUS"), ImmutableList.of(new Constant(createVarcharType(1), Slices.utf8Slice("F")), new Constant(createVarcharType(1), Slices.utf8Slice("O")))),
                                         tableScan("orders", ImmutableMap.of("ORDERSTATUS", "orderstatus"))),
                                 anyTree(
-                                        filter("CAST(NAME AS varchar(1)) IN ('F', 'O')",
+                                        filter(
+                                                new InPredicate(new Cast(new SymbolReference(VARCHAR, "NAME"), createVarcharType(1)), ImmutableList.of(new Constant(createVarcharType(1), Slices.utf8Slice("F")), new Constant(createVarcharType(1), Slices.utf8Slice("O")))),
                                                 tableScan(
                                                         "nation",
                                                         ImmutableMap.of("NAME", "name")))))));
@@ -446,7 +512,8 @@ public abstract class AbstractPredicatePushdownTest
                         node(JoinNode.class,
                                 enableDynamicFiltering ? filter(TRUE_LITERAL, ordersTableScan) : ordersTableScan,
                                 anyTree(
-                                        filter("CAST(NAME AS varchar(1)) IN ('F', 'O', 'P')",
+                                        filter(
+                                                new InPredicate(new Cast(new SymbolReference(VARCHAR, "NAME"), createVarcharType(1)), ImmutableList.of(new Constant(createVarcharType(1), Slices.utf8Slice("F")), new Constant(createVarcharType(1), Slices.utf8Slice("O")), new Constant(createVarcharType(1), Slices.utf8Slice("P")))),
                                                 tableScan(
                                                         "nation",
                                                         ImmutableMap.of("NAME", "name")))))));
@@ -473,11 +540,13 @@ public abstract class AbstractPredicatePushdownTest
                         join(INNER, builder -> builder
                                 .equiCriteria(ImmutableList.of())
                                 .left(
-                                        filter("((L_NATIONKEY = L_REGIONKEY) AND (L_REGIONKEY = BIGINT '5'))",
+                                        filter(
+                                                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "L_NATIONKEY"), new SymbolReference(BIGINT, "L_REGIONKEY")), new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "L_REGIONKEY"), new Constant(BIGINT, 5L)))),
                                                 tableScan("nation", ImmutableMap.of("L_NATIONKEY", "nationkey", "L_REGIONKEY", "regionkey"))))
                                 .right(
                                         anyTree(
-                                                filter("R_NATIONKEY = BIGINT '5'",
+                                                filter(
+                                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "R_NATIONKEY"), new Constant(BIGINT, 5L)),
                                                         tableScan("nation", ImmutableMap.of("R_NATIONKEY", "nationkey"))))))));
     }
 
@@ -489,7 +558,7 @@ public abstract class AbstractPredicatePushdownTest
                         join(INNER, builder -> builder
                                 .equiCriteria("L_NATIONKEY2", "R_NATIONKEY")
                                 .left(
-                                        project(ImmutableMap.of("L_NATIONKEY2", expression("L_NATIONKEY + BIGINT '1'")),
+                                        project(ImmutableMap.of("L_NATIONKEY2", expression(new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "L_NATIONKEY"), new Constant(BIGINT, 1L)))),
                                                 tableScan("nation", ImmutableMap.of("L_NATIONKEY", "nationkey"))))
                                 .right(
                                         anyTree(
@@ -500,11 +569,13 @@ public abstract class AbstractPredicatePushdownTest
                         join(INNER, builder -> builder
                                 .equiCriteria(ImmutableList.of())
                                 .left(
-                                        filter("L_NATIONKEY = BIGINT '5'",
+                                        filter(
+                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "L_NATIONKEY"), new Constant(BIGINT, 5L)),
                                                 tableScan("nation", ImmutableMap.of("L_NATIONKEY", "nationkey"))))
                                 .right(
                                         anyTree(
-                                                filter("R_NATIONKEY = BIGINT '5'",
+                                                filter(
+                                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "R_NATIONKEY"), new Constant(BIGINT, 5L)),
                                                         tableScan("nation", ImmutableMap.of("R_NATIONKEY", "nationkey"))))))));
     }
 
@@ -513,15 +584,18 @@ public abstract class AbstractPredicatePushdownTest
     {
         assertPlan("SELECT * FROM (SELECT * FROM NATION WHERE nationkey = 5) a JOIN nation b ON a.nationkey = b.nationkey AND a.nationkey = a.regionkey + b.regionkey",
                 output(
-                        filter("L_REGIONKEY + R_REGIONKEY = BIGINT '5'",
+                        filter(
+                                new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "L_REGIONKEY"), new SymbolReference(BIGINT, "R_REGIONKEY")), new Constant(BIGINT, 5L)),
                                 join(INNER, builder -> builder
                                         .equiCriteria(ImmutableList.of())
                                         .left(
-                                                filter("L_NATIONKEY = BIGINT '5'",
+                                                filter(
+                                                        new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "L_NATIONKEY"), new Constant(BIGINT, 5L)),
                                                         tableScan("nation", ImmutableMap.of("L_NATIONKEY", "nationkey", "L_REGIONKEY", "regionkey"))))
                                         .right(
                                                 anyTree(
-                                                        filter("R_NATIONKEY = BIGINT '5'",
+                                                        filter(
+                                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "R_NATIONKEY"), new Constant(BIGINT, 5L)),
                                                                 tableScan("nation", ImmutableMap.of("R_NATIONKEY", "nationkey", "R_REGIONKEY", "regionkey")))))))));
     }
 

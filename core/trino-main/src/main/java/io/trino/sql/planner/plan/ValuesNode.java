@@ -17,9 +17,9 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.Immutable;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Row;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.Row;
 
 import java.util.List;
 import java.util.Optional;
@@ -88,10 +88,10 @@ public class ValuesNode
             }
         }
         else {
-            checkArgument(outputSymbols.size() == 0, "missing rows specification for Values with non-empty output symbols");
+            checkArgument(outputSymbols.isEmpty(), "missing rows specification for Values with non-empty output symbols");
         }
 
-        if (outputSymbols.size() == 0) {
+        if (outputSymbols.isEmpty()) {
             this.rows = Optional.empty();
         }
         else {

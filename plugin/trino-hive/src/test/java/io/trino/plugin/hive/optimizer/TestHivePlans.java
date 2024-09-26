@@ -13,16 +13,30 @@
  */
 package io.trino.plugin.hive.optimizer;
 
+import com.google.common.collect.ImmutableList;
+import io.airlift.slice.Slices;
 import io.trino.Session;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.plugin.hive.TestingHiveConnectorFactory;
 import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
+import io.trino.spi.function.OperatorType;
 import io.trino.spi.security.PrincipalType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.BetweenPredicate;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.InPredicate;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.testing.PlanTester;
+import io.trino.type.LikePattern;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -39,6 +53,16 @@ import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
 import static io.trino.plugin.hive.TestingHiveUtils.getConnectorService;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.MODULUS;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.NOT_EQUAL;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.exchange;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
@@ -50,6 +74,7 @@ import static io.trino.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static io.trino.sql.planner.plan.ExchangeNode.Type.REPLICATE;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.type.LikePatternType.LIKE_PATTERN;
 
 public class TestHivePlans
         extends BasePlanTest
@@ -61,6 +86,11 @@ public class TestHivePlans
             .setCatalog(HIVE_CATALOG_NAME)
             .setSchema(SCHEMA_NAME)
             .build();
+
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction LIKE = FUNCTIONS.resolveFunction("$like", fromTypes(VARCHAR, LIKE_PATTERN));
+    private static final ResolvedFunction SUBSTRING = FUNCTIONS.resolveFunction("substring", fromTypes(VARCHAR, BIGINT));
+    private static final ResolvedFunction MODULUS_INTEGER = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(INTEGER, INTEGER));
 
     private File baseDir;
 
@@ -125,7 +155,8 @@ public class TestHivePlans
         assertDistributedPlan(
                 "SELECT * FROM table_str_partitioned WHERE str_part LIKE 't%'",
                 output(
-                        filter("\"$like\"(STR_PART, \"$literal$\"(from_base64('DgAAAFZBUklBQkxFX1dJRFRIAQAAAAEAAAAHAAAAAAcAAAACAAAAdCUA')))",
+                        filter(
+                                new FunctionCall(LIKE, ImmutableList.of(new SymbolReference(VARCHAR, "STR_PART"), new Constant(LIKE_PATTERN, LikePattern.compile("t%", Optional.empty())))),
                                 tableScan("table_str_partitioned", Map.of("INT_COL", "int_col", "STR_PART", "str_part")))));
     }
 
@@ -146,11 +177,13 @@ public class TestHivePlans
                                 .equiCriteria("L_STR_PART", "R_STR_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("\"$like\"(L_STR_PART, \"$literal$\"(from_base64('DgAAAFZBUklBQkxFX1dJRFRIAQAAAAEAAAAHAAAAAAcAAAACAAAAdCUA')))",
+                                                filter(
+                                                        new FunctionCall(LIKE, ImmutableList.of(new SymbolReference(VARCHAR, "L_STR_PART"), new Constant(LIKE_PATTERN, LikePattern.compile("t%", Optional.empty())))),
                                                         tableScan("table_str_partitioned", Map.of("L_INT_COL", "int_col", "L_STR_PART", "str_part")))))
                                 .right(exchange(LOCAL,
                                         exchange(REMOTE, REPARTITION,
-                                                filter("R_STR_COL IN ('three', CAST('two' AS varchar(5))) AND \"$like\"(R_STR_COL, \"$literal$\"(from_base64('DgAAAFZBUklBQkxFX1dJRFRIAQAAAAEAAAAHAAAAAAcAAAACAAAAdCUA')))",
+                                                filter(
+                                                        new LogicalExpression(AND, ImmutableList.of(new InPredicate(new SymbolReference(VARCHAR, "R_STR_COL"), ImmutableList.of(new Constant(createVarcharType(5), Slices.utf8Slice("three")), new Constant(createVarcharType(5), Slices.utf8Slice("two")))), new FunctionCall(LIKE, ImmutableList.of(new SymbolReference(VARCHAR, "R_STR_COL"), new Constant(LIKE_PATTERN, LikePattern.compile("t%", Optional.empty())))))),
                                                         tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -168,12 +201,14 @@ public class TestHivePlans
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("true", // dynamic filter
+                                                filter(
+                                                        TRUE_LITERAL,
                                                         tableScan("table_int_partitioned", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col")))))
                                 .right(
                                         exchange(LOCAL,
                                                 exchange(REMOTE, REPARTITION,
-                                                        filter("R_INT_COL IN (2, 3, 4)",
+                                                        filter(
+                                                                new InPredicate(new SymbolReference(INTEGER, "R_INT_COL"), ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 3L), new Constant(INTEGER, 4L))),
                                                                 tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -192,12 +227,14 @@ public class TestHivePlans
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("L_STR_COL != 'three'",
+                                                filter(
+                                                        new ComparisonExpression(NOT_EQUAL, new SymbolReference(createVarcharType(5), "L_STR_COL"), new Constant(createVarcharType(5), Slices.utf8Slice("three"))),
                                                         tableScan("table_int_partitioned", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col")))))
                                 .right(
                                         exchange(LOCAL,
                                                 exchange(REMOTE, REPARTITION,
-                                                        filter("R_INT_COL IN (2, 3, 4) AND R_INT_COL BETWEEN 2 AND 4", // TODO: R_INT_COL BETWEEN 2 AND 4 is redundant
+                                                        filter(
+                                                                new LogicalExpression(AND, ImmutableList.of(new InPredicate(new SymbolReference(INTEGER, "R_INT_COL"), ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 3L), new Constant(INTEGER, 4L))), new BetweenPredicate(new SymbolReference(INTEGER, "R_INT_COL"), new Constant(INTEGER, 2L), new Constant(INTEGER, 4L)))),
                                                                 tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -216,12 +253,14 @@ public class TestHivePlans
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("substring(L_STR_COL, BIGINT '2') != CAST('hree' AS varchar(5))",
+                                                filter(
+                                                        new ComparisonExpression(NOT_EQUAL, new FunctionCall(SUBSTRING, ImmutableList.of(new SymbolReference(VARCHAR, "L_STR_COL"), new Constant(BIGINT, 2L))), new Constant(createVarcharType(5), Slices.utf8Slice("hree"))),
                                                         tableScan("table_int_partitioned", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col")))))
                                 .right(
                                         exchange(LOCAL,
                                                 exchange(REMOTE, REPARTITION,
-                                                        filter("R_INT_COL IN (2, 3, 4) AND R_INT_COL BETWEEN 2 AND 4", // TODO: R_INT_COL BETWEEN 2 AND 4 is redundant
+                                                        filter(
+                                                                new LogicalExpression(AND, ImmutableList.of(new InPredicate(new SymbolReference(INTEGER, "R_INT_COL"), ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 3L), new Constant(INTEGER, 4L))), new BetweenPredicate(new SymbolReference(INTEGER, "R_INT_COL"), new Constant(INTEGER, 2L), new Constant(INTEGER, 4L)))),
                                                                 tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -240,12 +279,14 @@ public class TestHivePlans
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("L_INT_PART % 2 = 0",
+                                                filter(
+                                                        new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(MODULUS_INTEGER, MODULUS, new SymbolReference(INTEGER, "L_INT_PART"), new Constant(INTEGER, 2L)), new Constant(INTEGER, 0L)),
                                                         tableScan("table_int_partitioned", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col")))))
                                 .right(
                                         exchange(LOCAL,
                                                 exchange(REMOTE, REPARTITION,
-                                                        filter("R_INT_COL IN (2, 4) AND R_INT_COL % 2 = 0",
+                                                        filter(
+                                                                new LogicalExpression(AND, ImmutableList.of(new InPredicate(new SymbolReference(INTEGER, "R_INT_COL"), ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 4L))), new ComparisonExpression(EQUAL, new ArithmeticBinaryExpression(MODULUS_INTEGER, MODULUS, new SymbolReference(INTEGER, "R_INT_COL"), new Constant(INTEGER, 2L)), new Constant(INTEGER, 0L)))),
                                                                 tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -261,12 +302,14 @@ public class TestHivePlans
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
                                         exchange(REMOTE, REPARTITION,
-                                                filter("true", //dynamic filter
+                                                filter(
+                                                        TRUE_LITERAL,
                                                         tableScan("table_int_partitioned", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col")))))
                                 .right(
                                         exchange(LOCAL,
                                                 exchange(REMOTE, REPARTITION,
-                                                        filter("R_INT_COL IN (1, 2, 3, 4, 5)",
+                                                        filter(
+                                                                new InPredicate(new SymbolReference(INTEGER, "R_INT_COL"), ImmutableList.of(new Constant(INTEGER, 1L), new Constant(INTEGER, 2L), new Constant(INTEGER, 3L), new Constant(INTEGER, 4L), new Constant(INTEGER, 5L))),
                                                                 tableScan("table_unpartitioned", Map.of("R_STR_COL", "str_col", "R_INT_COL", "int_col")))))))));
     }
 
@@ -280,7 +323,8 @@ public class TestHivePlans
                         join(INNER, builder -> builder
                                 .equiCriteria("L_INT_PART", "R_INT_COL")
                                 .left(
-                                        filter("true", //dynamic filter
+                                        filter(
+                                                TRUE_LITERAL,
                                                 tableScan("table_int_with_too_many_partitions", Map.of("L_INT_PART", "int_part", "L_STR_COL", "str_col"))))
                                 .right(
                                         exchange(LOCAL,

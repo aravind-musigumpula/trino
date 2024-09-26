@@ -15,37 +15,44 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.RowType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.SubscriptExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.Assignments;
-import io.trino.sql.tree.ArithmeticBinaryExpression;
-import io.trino.sql.tree.LongLiteral;
-import io.trino.sql.tree.SubscriptExpression;
-import io.trino.sql.tree.SymbolReference;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.ADD;
+import static io.trino.sql.ir.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.limit;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.strictProject;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.tree.ArithmeticBinaryExpression.Operator.ADD;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.tree.SortItem.NullOrdering.FIRST;
 import static io.trino.sql.tree.SortItem.Ordering.ASCENDING;
 
 public class TestPushLimitThroughProject
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction ADD_BIGINT = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(BIGINT, BIGINT));
+
     @Test
     public void testPushdownLimitNonIdentityProjection()
     {
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     return p.limit(1,
@@ -55,14 +62,14 @@ public class TestPushLimitThroughProject
                 })
                 .matches(
                         strictProject(
-                                ImmutableMap.of("b", expression("true")),
+                                ImmutableMap.of("b", expression(TRUE_LITERAL)),
                                 limit(1, values())));
     }
 
     @Test
     public void testPushdownLimitWithTiesNNonIdentityProjection()
     {
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol projectedA = p.symbol("projectedA");
                     Symbol a = p.symbol("a");
@@ -72,19 +79,19 @@ public class TestPushLimitThroughProject
                             1,
                             ImmutableList.of(projectedA),
                             p.project(
-                                    Assignments.of(projectedA, new SymbolReference("a"), projectedB, new SymbolReference("b")),
+                                    Assignments.of(projectedA, new SymbolReference(BIGINT, "a"), projectedB, new SymbolReference(BIGINT, "b")),
                                     p.values(a, b)));
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("projectedA", expression("a"), "projectedB", expression("b")),
+                                ImmutableMap.of("projectedA", expression(new SymbolReference(BIGINT, "a")), "projectedB", expression(new SymbolReference(BIGINT, "b"))),
                                 limit(1, ImmutableList.of(sort("a", ASCENDING, FIRST)), values("a", "b"))));
     }
 
     @Test
     public void testPushdownLimitWithTiesThroughProjectionWithExpression()
     {
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol projectedA = p.symbol("projectedA");
                     Symbol a = p.symbol("a");
@@ -95,20 +102,22 @@ public class TestPushLimitThroughProject
                             ImmutableList.of(projectedA),
                             p.project(
                                     Assignments.of(
-                                            projectedA, new SymbolReference("a"),
-                                            projectedC, new ArithmeticBinaryExpression(ADD, new SymbolReference("a"), new SymbolReference("b"))),
+                                            projectedA, new SymbolReference(BIGINT, "a"),
+                                            projectedC, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b"))),
                                     p.values(a, b)));
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("projectedA", expression("a"), "projectedC", expression("a + b")),
+                                ImmutableMap.of(
+                                        "projectedA", expression(new SymbolReference(BIGINT, "a")),
+                                        "projectedC", expression(new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b")))),
                                 limit(1, ImmutableList.of(sort("a", ASCENDING, FIRST)), values("a", "b"))));
     }
 
     @Test
     public void testDoNotPushdownLimitWithTiesThroughProjectionWithExpression()
     {
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol projectedA = p.symbol("projectedA");
                     Symbol a = p.symbol("a");
@@ -119,8 +128,8 @@ public class TestPushLimitThroughProject
                             ImmutableList.of(projectedC),
                             p.project(
                                     Assignments.of(
-                                            projectedA, new SymbolReference("a"),
-                                            projectedC, new ArithmeticBinaryExpression(ADD, new SymbolReference("a"), new SymbolReference("b"))),
+                                            projectedA, new SymbolReference(BIGINT, "a"),
+                                            projectedC, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b"))),
                                     p.values(a, b)));
                 })
                 .doesNotFire();
@@ -129,7 +138,7 @@ public class TestPushLimitThroughProject
     @Test
     public void testDoesntPushdownLimitThroughIdentityProjection()
     {
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     return p.limit(1,
@@ -144,14 +153,14 @@ public class TestPushLimitThroughProject
     {
         RowType rowType = RowType.from(ImmutableList.of(new RowType.Field(Optional.of("x"), BIGINT), new RowType.Field(Optional.of("y"), BIGINT)));
 
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol a = p.symbol("a", rowType);
                     return p.limit(1,
                             p.project(
                                     Assignments.of(
-                                            p.symbol("b"), new SubscriptExpression(a.toSymbolReference(), new LongLiteral("1")),
-                                            p.symbol("c"), new SubscriptExpression(a.toSymbolReference(), new LongLiteral("2"))),
+                                            p.symbol("b"), new SubscriptExpression(BIGINT, a.toSymbolReference(), new Constant(INTEGER, 1L)),
+                                            p.symbol("c"), new SubscriptExpression(BIGINT, a.toSymbolReference(), new Constant(INTEGER, 2L))),
                                     p.values(a)));
                 })
                 .doesNotFire();
@@ -161,7 +170,7 @@ public class TestPushLimitThroughProject
     public void testLimitWithPreSortedInputs()
     {
         // Do not push down order sensitive Limit if input ordering depends on symbol produced by Project
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol projectedA = p.symbol("projectedA");
                     Symbol a = p.symbol("a");
@@ -173,13 +182,13 @@ public class TestPushLimitThroughProject
                             ImmutableList.of(projectedC),
                             p.project(
                                     Assignments.of(
-                                            projectedA, new SymbolReference("a"),
-                                            projectedC, new ArithmeticBinaryExpression(ADD, new SymbolReference("a"), new SymbolReference("b"))),
+                                            projectedA, new SymbolReference(BIGINT, "a"),
+                                            projectedC, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b"))),
                                     p.values(a, b)));
                 })
                 .doesNotFire();
 
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol projectedA = p.symbol("projectedA");
                     Symbol a = p.symbol("a");
@@ -192,13 +201,13 @@ public class TestPushLimitThroughProject
                             ImmutableList.of(projectedA),
                             p.project(
                                     Assignments.of(
-                                            projectedA, new SymbolReference("a"),
-                                            projectedC, new ArithmeticBinaryExpression(ADD, new SymbolReference("a"), new SymbolReference("b"))),
+                                            projectedA, new SymbolReference(BIGINT, "a"),
+                                            projectedC, new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b"))),
                                     p.values(a, b)));
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("projectedA", expression("a"), "projectedC", expression("a + b")),
+                                ImmutableMap.of("projectedA", expression(new SymbolReference(BIGINT, "a")), "projectedC", expression(new ArithmeticBinaryExpression(ADD_BIGINT, ADD, new SymbolReference(BIGINT, "a"), new SymbolReference(BIGINT, "b")))),
                                 limit(1, ImmutableList.of(), true, ImmutableList.of("a"), values("a", "b"))));
     }
 
@@ -207,19 +216,19 @@ public class TestPushLimitThroughProject
     {
         RowType rowType = RowType.from(ImmutableList.of(new RowType.Field(Optional.of("x"), BIGINT), new RowType.Field(Optional.of("y"), BIGINT)));
 
-        tester().assertThat(new PushLimitThroughProject(tester().getTypeAnalyzer()))
+        tester().assertThat(new PushLimitThroughProject())
                 .on(p -> {
                     Symbol a = p.symbol("a", rowType);
                     return p.limit(1,
                             p.project(
                                     Assignments.of(
-                                            p.symbol("b"), new SubscriptExpression(a.toSymbolReference(), new LongLiteral("1")),
+                                            p.symbol("b"), new SubscriptExpression(BIGINT, a.toSymbolReference(), new Constant(INTEGER, 1L)),
                                             p.symbol("c", rowType), a.toSymbolReference()),
                                     p.values(a)));
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("b", expression("a[1]"), "c", expression("a")),
+                                ImmutableMap.of("b", io.trino.sql.planner.assertions.PlanMatchPattern.expression(new SubscriptExpression(BIGINT, new SymbolReference(rowType, "a"), new Constant(INTEGER, 1L))), "c", expression(new SymbolReference(rowType, "a"))),
                                 limit(1,
                                         values("a"))));
     }

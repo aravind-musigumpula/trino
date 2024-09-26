@@ -18,14 +18,25 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableHandle;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
+import io.trino.spi.type.RowType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SubscriptExpression;
+import io.trino.sql.ir.SymbolReference;
 import io.trino.sql.planner.assertions.BasePushdownPlanTest;
 import io.trino.testing.PlanTester;
 import org.junit.jupiter.api.AfterAll;
@@ -43,6 +54,10 @@ import static com.google.common.base.Predicates.equalTo;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.ADD;
+import static io.trino.sql.ir.ComparisonExpression.Operator.EQUAL;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.any;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -59,6 +74,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestIcebergProjectionPushdownPlans
         extends BasePushdownPlanTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction ADD_INTEGER = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(INTEGER, INTEGER));
+
     private static final String CATALOG = "iceberg";
     private static final String SCHEMA = "schema";
     private File metastoreDir;
@@ -122,7 +140,7 @@ public class TestIcebergProjectionPushdownPlans
                 session,
                 any(
                         project(
-                                ImmutableMap.of("expr", expression("col0[1]"), "expr_2", expression("col0[2]")),
+                                ImmutableMap.of("expr", expression(new SubscriptExpression(BIGINT, new SymbolReference(RowType.anonymousRow(BIGINT, BIGINT), "col0"), new Constant(INTEGER, 1L))), "expr_2", expression(new SubscriptExpression(BIGINT, new SymbolReference(RowType.anonymousRow(BIGINT, BIGINT), "col0"), new Constant(INTEGER, 2L)))),
                                 tableScan(testTable, ImmutableMap.of("col0", "col0")))));
     }
 
@@ -175,7 +193,7 @@ public class TestIcebergProjectionPushdownPlans
                 format("SELECT col0.x FROM %s WHERE col0.x = col1 + 3 and col0.y = 2", testTable),
                 anyTree(
                         filter(
-                                "y = BIGINT '2' AND (x =  CAST((col1 + 3) AS BIGINT))",
+                                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "y"), new Constant(BIGINT, 2L)), new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "x"), new Cast(new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "col1"), new Constant(INTEGER, 3L)), BIGINT)))),
                                 tableScan(
                                         table -> {
                                             IcebergTableHandle icebergTableHandle = (IcebergTableHandle) table;
@@ -191,7 +209,7 @@ public class TestIcebergProjectionPushdownPlans
                 format("SELECT col0, col0.y expr_y FROM %s WHERE col0.x = 5", testTable),
                 anyTree(
                         filter(
-                                "x = BIGINT '5'",
+                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "x"), new Constant(BIGINT, 5L)),
                                 tableScan(
                                         table -> {
                                             IcebergTableHandle icebergTableHandle = (IcebergTableHandle) table;
@@ -208,9 +226,9 @@ public class TestIcebergProjectionPushdownPlans
                 anyTree(
                         project(
                                 ImmutableMap.of(
-                                        "expr_0_x", expression("expr_0[1]"),
-                                        "expr_0", expression("expr_0"),
-                                        "expr_0_y", expression("expr_0[2]")),
+                                        "expr_0_x", expression(new SubscriptExpression(BIGINT, new SymbolReference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0"), new Constant(INTEGER, 1L))),
+                                        "expr_0", expression(new SymbolReference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0")),
+                                        "expr_0_y", expression(new SubscriptExpression(BIGINT, new SymbolReference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0"), new Constant(INTEGER, 2L)))),
                                 join(INNER, builder -> builder
                                         .equiCriteria("s_expr_1", "t_expr_1")
                                         .left(
@@ -222,7 +240,7 @@ public class TestIcebergProjectionPushdownPlans
                                         .right(
                                                 anyTree(
                                                         filter(
-                                                                "x = BIGINT '2'",
+                                                                new ComparisonExpression(EQUAL, new SymbolReference(BIGINT, "x"), new Constant(BIGINT, 2L)),
                                                                 tableScan(
                                                                         table -> {
                                                                             IcebergTableHandle icebergTableHandle = (IcebergTableHandle) table;

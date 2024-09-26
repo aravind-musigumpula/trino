@@ -13,15 +13,19 @@
  */
 package io.trino.sql.planner;
 
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import io.trino.spi.type.Type;
-import io.trino.sql.ExpressionTestUtils;
-import io.trino.sql.PlannerContext;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
-import io.trino.transaction.TestingTransactionManager;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.function.OperatorType;
+import io.trino.sql.ir.ArithmeticBinaryExpression;
+import io.trino.sql.ir.BetweenPredicate;
+import io.trino.sql.ir.ComparisonExpression;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FunctionCall;
+import io.trino.sql.ir.LogicalExpression;
+import io.trino.sql.ir.SymbolReference;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -29,89 +33,118 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.ArithmeticBinaryExpression.Operator.ADD;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.IrUtils.extractConjuncts;
-import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
+import static io.trino.sql.ir.LogicalExpression.Operator.AND;
+import static io.trino.sql.ir.LogicalExpression.Operator.OR;
+import static io.trino.type.UnknownType.UNKNOWN;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSortExpressionExtractor
 {
-    private static final TestingTransactionManager TRANSACTION_MANAGER = new TestingTransactionManager();
-    private static final PlannerContext PLANNER_CONTEXT = plannerContextBuilder()
-            .withTransactionManager(TRANSACTION_MANAGER)
-            .build();
-    private static final TypeProvider TYPE_PROVIDER = TypeProvider.copyOf(ImmutableMap.<Symbol, Type>builder()
-            .put(new Symbol("b1"), DOUBLE)
-            .put(new Symbol("b2"), DOUBLE)
-            .put(new Symbol("p1"), BIGINT)
-            .put(new Symbol("p2"), DOUBLE)
-            .buildOrThrow());
-    private static final Set<Symbol> BUILD_SYMBOLS = ImmutableSet.of(new Symbol("b1"), new Symbol("b2"));
+    private static final Set<Symbol> BUILD_SYMBOLS = ImmutableSet.of(new Symbol(UNKNOWN, "b1"), new Symbol(UNKNOWN, "b2"));
+
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction SIN = FUNCTIONS.resolveFunction("sin", fromTypes(DOUBLE));
+    private static final ResolvedFunction RANDOM = FUNCTIONS.resolveFunction("random", fromTypes(BIGINT));
+    private static final ResolvedFunction ADD_INTEGER = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(INTEGER, INTEGER));
 
     @Test
     public void testGetSortExpression()
     {
-        assertGetSortExpression("p1 > b1", "b1");
+        assertGetSortExpression(
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1")),
+                "b1");
 
-        assertGetSortExpression("b2 <= p1", "b2");
+        assertGetSortExpression(
+                new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")),
+                "b2");
 
-        assertGetSortExpression("b2 > p1", "b2");
+        assertGetSortExpression(
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")),
+                "b2");
 
-        assertGetSortExpression("b2 > sin(p1)", "b2");
+        assertGetSortExpression(
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new FunctionCall(SIN, ImmutableList.of(new SymbolReference(BIGINT, "p1")))),
+                "b2");
 
-        assertNoSortExpression("b2 > random(p1)");
+        assertNoSortExpression(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new FunctionCall(RANDOM, ImmutableList.of(new SymbolReference(BIGINT, "p1")))));
 
-        assertGetSortExpression("b2 > random(p1) AND b2 > p1", "b2", "b2 > p1");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new FunctionCall(RANDOM, ImmutableList.of(new SymbolReference(BIGINT, "p1")))), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")))),
+                "b2",
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")));
 
-        assertGetSortExpression("b2 > random(p1) AND b1 > p1", "b1", "b1 > p1");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new FunctionCall(RANDOM, ImmutableList.of(new SymbolReference(BIGINT, "p1")))), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")))),
+                "b1",
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")));
 
-        assertNoSortExpression("b1 > p1 + b2");
+        assertNoSortExpression(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new SymbolReference(INTEGER, "b2"))));
 
-        assertNoSortExpression("sin(b1) > p1");
+        assertNoSortExpression(new ComparisonExpression(GREATER_THAN, new FunctionCall(SIN, ImmutableList.of(new SymbolReference(BIGINT, "b1"))), new SymbolReference(BIGINT, "p1")));
 
-        assertNoSortExpression("b1 <= p1 OR b2 <= p1");
+        assertNoSortExpression(new LogicalExpression(OR, ImmutableList.of(new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")))));
 
-        assertNoSortExpression("sin(b2) > p1 AND (b2 <= p1 OR b2 <= p1 + 10)");
+        assertNoSortExpression(new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new FunctionCall(SIN, ImmutableList.of(new SymbolReference(BIGINT, "b2"))), new SymbolReference(BIGINT, "p1")), new LogicalExpression(OR, ImmutableList.of(new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new Constant(INTEGER, 10L))))))));
 
-        assertGetSortExpression("sin(b2) > p1 AND (b2 <= p1 AND b2 <= p1 + 10)", "b2", "b2 <= p1", "b2 <= p1 + 10");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new FunctionCall(SIN, ImmutableList.of(new SymbolReference(BIGINT, "b2"))), new SymbolReference(BIGINT, "p1")), new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new Constant(INTEGER, 10L))))))),
+                "b2",
+                new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")),
+                new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new Constant(INTEGER, 10L))));
 
-        assertGetSortExpression("b1 > p1 AND b1 <= p1", "b1");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")))),
+                "b1");
 
-        assertGetSortExpression("b1 > p1 AND b1 <= p1 AND b2 > p1", "b1", "b1 > p1", "b1 <= p1");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")))),
+                "b1",
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")),
+                new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")));
 
-        assertGetSortExpression("b1 > p1 AND b1 <= p1 AND b2 > p1 AND b2 < p1 + 10 AND b2 > p2", "b2", "b2 > p1", "b2 < p1 + 10", "b2 > p2");
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")), new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "b2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new Constant(INTEGER, 10L))), new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p2")))),
+                "b2",
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p1")),
+                new ComparisonExpression(LESS_THAN, new SymbolReference(BIGINT, "b2"), new ArithmeticBinaryExpression(ADD_INTEGER, ADD, new SymbolReference(INTEGER, "p1"), new Constant(INTEGER, 10L))),
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b2"), new SymbolReference(BIGINT, "p2")));
 
-        assertGetSortExpression("p1 BETWEEN b1 AND b2", "b1", "p1 >= b1");
+        assertGetSortExpression(
+                new BetweenPredicate(new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "b2")),
+                "b1",
+                new ComparisonExpression(GREATER_THAN_OR_EQUAL, new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1")));
 
-        assertGetSortExpression("p1 BETWEEN p2 AND b1", "b1", "p1 <= b1");
+        assertGetSortExpression(
+                new BetweenPredicate(new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "p2"), new SymbolReference(BIGINT, "b1")),
+                "b1",
+                new ComparisonExpression(LESS_THAN_OR_EQUAL, new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1")));
 
-        assertGetSortExpression("b1 BETWEEN p1 AND p2", "b1", "b1 >= p1");
+        assertGetSortExpression(
+                new BetweenPredicate(new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "p2")),
+                "b1",
+                new ComparisonExpression(GREATER_THAN_OR_EQUAL, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")));
 
-        assertGetSortExpression("b1 > p1 AND p1 BETWEEN b1 AND b2", "b1", "b1 > p1", "p1 >= b1");
-    }
-
-    private Expression expression(String sql)
-    {
-        return ExpressionTestUtils.planExpression(TRANSACTION_MANAGER, PLANNER_CONTEXT, TEST_SESSION, TYPE_PROVIDER, PlanBuilder.expression(sql));
-    }
-
-    private void assertNoSortExpression(String expression)
-    {
-        assertNoSortExpression(expression(expression));
+        assertGetSortExpression(
+                new LogicalExpression(AND, ImmutableList.of(new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")), new BetweenPredicate(new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "b2")))),
+                "b1",
+                new ComparisonExpression(GREATER_THAN, new SymbolReference(BIGINT, "b1"), new SymbolReference(BIGINT, "p1")),
+                new ComparisonExpression(GREATER_THAN_OR_EQUAL, new SymbolReference(BIGINT, "p1"), new SymbolReference(BIGINT, "b1")));
     }
 
     private void assertNoSortExpression(Expression expression)
     {
-        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(PLANNER_CONTEXT.getMetadata(), BUILD_SYMBOLS, expression);
+        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(BUILD_SYMBOLS, expression);
         assertThat(actual).isEqualTo(Optional.empty());
-    }
-
-    private void assertGetSortExpression(String expression, String expectedSymbol)
-    {
-        assertGetSortExpression(expression(expression), expectedSymbol);
     }
 
     private void assertGetSortExpression(Expression expression, String expectedSymbol)
@@ -120,23 +153,15 @@ public class TestSortExpressionExtractor
         assertGetSortExpression(expression, expectedSymbol, extractConjuncts(expression));
     }
 
-    private void assertGetSortExpression(String expression, String expectedSymbol, String... searchExpressions)
+    private void assertGetSortExpression(Expression expression, String expectedSymbol, Expression... searchExpressions)
     {
-        assertGetSortExpression(expression(expression), expectedSymbol, searchExpressions);
-    }
-
-    private void assertGetSortExpression(Expression expression, String expectedSymbol, String... searchExpressions)
-    {
-        List<Expression> searchExpressionList = Arrays.stream(searchExpressions)
-                .map(this::expression)
-                .collect(toImmutableList());
-        assertGetSortExpression(expression, expectedSymbol, searchExpressionList);
+        assertGetSortExpression(expression, expectedSymbol, Arrays.asList(searchExpressions));
     }
 
     private void assertGetSortExpression(Expression expression, String expectedSymbol, List<Expression> searchExpressions)
     {
-        Optional<SortExpressionContext> expected = Optional.of(new SortExpressionContext(new SymbolReference(expectedSymbol), searchExpressions));
-        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(PLANNER_CONTEXT.getMetadata(), BUILD_SYMBOLS, expression);
+        Optional<SortExpressionContext> expected = Optional.of(new SortExpressionContext(new SymbolReference(BIGINT, expectedSymbol), searchExpressions));
+        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(BUILD_SYMBOLS, expression);
         assertThat(actual).isEqualTo(expected);
     }
 }
