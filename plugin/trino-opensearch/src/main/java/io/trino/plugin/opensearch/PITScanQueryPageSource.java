@@ -28,6 +28,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.common.document.DocumentField;
+import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 
@@ -47,20 +48,20 @@ import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.isEqual;
 import static java.util.stream.Collectors.toList;
 
-public class ScanQueryPageSource
+public class PITScanQueryPageSource
         implements ConnectorPageSource
 {
-    private static final Logger LOG = Logger.get(ScanQueryPageSource.class);
+    private static final Logger LOG = Logger.get(PITScanQueryPageSource.class);
 
     private final List<Decoder> decoders;
 
-    private final SearchHitIterator iterator;
+    private final PITSearchHitIterator iterator;
     private final BlockBuilder[] columnBuilders;
     private final List<OpenSearchColumnHandle> columns;
     private long totalBytes;
     private long readTimeNanos;
 
-    public ScanQueryPageSource(
+    public PITScanQueryPageSource(
             OpenSearchClient client,
             TypeManager typeManager,
             OpenSearchTableHandle table,
@@ -87,6 +88,7 @@ public class ScanQueryPageSource
                 .filter(entry -> entry.getValue().equals(TIMESTAMP_MILLIS))
                 .map(Map.Entry::getKey)
                 .collect(toImmutableList());
+
         System.out.println("documentFields: " + documentFields);
         System.out.println("TIMESTAMP_MILLIS: " + TIMESTAMP_MILLIS);
 
@@ -106,8 +108,6 @@ public class ScanQueryPageSource
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
 
-        System.out.println("requiredFields: " + requiredFields);
-
         // sorting by _doc (index order) get special treatment in OpenSearch and is more efficient
         Optional<String> sort = Optional.of("_doc");
 
@@ -118,16 +118,29 @@ public class ScanQueryPageSource
         }
 
         long start = System.nanoTime();
-        SearchResponse searchResponse = client.beginSearch(
+
+        QueryBuilder queryBuilder = OpenSearchQueryBuilder.buildSearchQuery(
+                table.getConstraint().transformKeys(OpenSearchColumnHandle.class::cast),
+                table.getQuery(),
+                table.getRegexes());
+        Optional<List<String>> fields = needAllFields ? Optional.empty() : Optional.of(requiredFields);
+
+        //CreatePitResponse pitResponse = client.createPITRequest(split.getIndex(), split.getShard());
+        //String pitId = pitResponse.getId();
+
+        SearchResponse searchResponse = client.pitSearch(
                 split.getIndex(),
                 split.getShard(),
-                OpenSearchQueryBuilder.buildSearchQuery(table.getConstraint().transformKeys(OpenSearchColumnHandle.class::cast), table.getQuery(), table.getRegexes()),
-                needAllFields ? Optional.empty() : Optional.of(requiredFields),
+                split.getPitId(),
+                split.getShardCount(),
+                queryBuilder,
+                fields,
                 documentFields,
                 sort,
-                table.getLimit());
+                table.getLimit(), null);
         readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchHitIterator(client, () -> searchResponse, table.getLimit());
+        System.out.println("Received response from PIT search docs retreived : " + searchResponse.getHits().getHits().length + " for split: " + split.getShard());
+        this.iterator = new PITSearchHitIterator(client, () -> searchResponse, table.getLimit(), split, queryBuilder, fields, documentFields, sort);
     }
 
     @Override
@@ -253,26 +266,35 @@ public class ScanQueryPageSource
         return base + "." + element;
     }
 
-    private static class SearchHitIterator
+    private static class PITSearchHitIterator
             extends AbstractIterator<SearchHit>
     {
         private final OpenSearchClient client;
         private final Supplier<SearchResponse> first;
         private final OptionalLong limit;
-
         private SearchHits searchHits;
-        private String scrollId;
+        private String pitId;
         private int currentPosition;
-
         private long readTimeNanos;
         private long totalRecordCount;
+        private Object[] searchAfterValues;
+        private final OpenSearchSplit split;
+        private QueryBuilder queryBuilder;
+        private Optional<List<String>> fields;
+        private List<String> documentFields;
+        private Optional<String> sort;
 
-        public SearchHitIterator(OpenSearchClient client, Supplier<SearchResponse> first, OptionalLong limit)
+        public PITSearchHitIterator(OpenSearchClient client, Supplier<SearchResponse> first, OptionalLong limit, OpenSearchSplit split, QueryBuilder queryBuilder, Optional<List<String>> fields, List<String> documentFields, Optional<String> sort)
         {
             this.client = client;
             this.first = first;
             this.limit = limit;
             this.totalRecordCount = 0;
+            this.split = split;
+            this.queryBuilder = queryBuilder;
+            this.fields = fields;
+            this.documentFields = documentFields;
+            this.sort = sort;
         }
 
         public long getReadTimeNanos()
@@ -288,7 +310,7 @@ public class ScanQueryPageSource
                 return endOfData();
             }
 
-            if (scrollId == null) {
+            if (pitId == null) {
                 long start = System.nanoTime();
                 SearchResponse response = first.get();
                 readTimeNanos += System.nanoTime() - start;
@@ -296,7 +318,18 @@ public class ScanQueryPageSource
             }
             else if (currentPosition == searchHits.getHits().length) {
                 long start = System.nanoTime();
-                SearchResponse response = client.nextPage(scrollId);
+                System.out.println("Fetching search again , searchAfterValues: " + searchAfterValues);
+                SearchResponse response = client.pitSearch(
+                        split.getIndex(),
+                        split.getShard(),
+                        pitId,
+                        split.getShardCount(),
+                        queryBuilder,
+                        fields,
+                        documentFields,
+                        sort,
+                        limit,
+                        searchAfterValues);
                 readTimeNanos += System.nanoTime() - start;
                 reset(response);
             }
@@ -306,6 +339,7 @@ public class ScanQueryPageSource
             }
 
             SearchHit hit = searchHits.getAt(currentPosition);
+            searchAfterValues = hit.getSortValues();
             currentPosition++;
             totalRecordCount++;
 
@@ -314,20 +348,22 @@ public class ScanQueryPageSource
 
         private void reset(SearchResponse response)
         {
-            scrollId = response.getScrollId();
+            pitId = response.pointInTimeId();
             searchHits = response.getHits();
             currentPosition = 0;
         }
 
         public void close()
         {
-            if (scrollId != null) {
+            if (pitId != null) {
                 try {
-                    client.clearScroll(scrollId);
+                    System.out.println("Finished scanning, PIT: " + pitId + " split: " + split.getShard() + " current position: " + currentPosition);
+                    //client.deletePit(pitId);
+                    //throw new Exception("Deleting PIT");
                 }
                 catch (Exception e) {
                     // ignore
-                    LOG.debug(e, "Error clearing scroll");
+                    LOG.debug(e, "Error Deleting PIT");
                 }
             }
         }

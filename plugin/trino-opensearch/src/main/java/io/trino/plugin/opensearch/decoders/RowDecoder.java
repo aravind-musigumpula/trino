@@ -20,6 +20,7 @@ import io.trino.plugin.opensearch.ScanQueryPageSource;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
+import org.opensearch.common.document.DocumentField;
 import org.opensearch.search.SearchHit;
 
 import java.util.List;
@@ -57,7 +58,7 @@ public class RowDecoder
             ((RowBlockBuilder) output).buildEntry(fieldBuilders -> {
                 for (int i = 0; i < decoders.size(); i++) {
                     String field = fieldNames.get(i);
-                    decoders.get(i).decode(hit, () -> ScanQueryPageSource.getField((Map<String, Object>) data, field), fieldBuilders.get(i));
+                    decoders.get(i).decode(hit, () -> ScanQueryPageSource.getField((Map<String, DocumentField>) data, field), fieldBuilders.get(i));
                 }
             });
         }
